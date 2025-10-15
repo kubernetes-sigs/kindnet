@@ -22,9 +22,7 @@ Kindnet evolved adding new features, as an embedded ipmasq agent and nowadays,
 is the default CNI plugin for [KIND](https://github.com/kubernetes-sigs/kind)
 and is used for testing the [Kubernetes project](https://github.com/kubernetes/kubernetes).
 
-All the stable code moves to the KIND project in-tree.
-This repo is kept only for new features development and get feedback of people
-using it on "real" clusters.
+The KIND project uses a subset of this project that is maintained in-tree.
 
 ## Features
 
@@ -43,14 +41,14 @@ using it on "real" clusters.
 
 ## How it Works
 
-Kindnet uses a simple point to point model to connect pods within the same node.  It leverages the host's network stack for external communication, eliminating the need for complex overlay networks.
+Kindnet uses a simple point to point model to connect pods within the same node. It leverages the host's network stack for external communication, eliminating the need for complex overlay networks.
 
 ## Installation
 
 Kindnet can be installed on your cluster using the manifest [install-kindnet.yaml](install-kindnet.yaml)
 
 ```sh
-kubectl create -f https://raw.githubusercontent.com/aojea/kindnet/main/install-kindnet.yaml
+kubectl create -f https://raw.githubusercontent.com/kubernetes-sigs/kindnet/refs/heads/main/install-kindnet.yaml
 ```
 
 ## Contributing
