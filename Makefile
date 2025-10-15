@@ -45,3 +45,12 @@ image-build:
 		--progress="${PROGRESS}" \
 		--platform="${PLATFORMS}" \
 		--tag="${IMAGE}" --load
+
+image-push:
+	docker buildx build . \
+		--progress="${PROGRESS}" \
+		--platform="${PLATFORMS}" \
+		--tag="${IMAGE}" --push
+
+release: build image-push
+	@echo "Released image: ${IMAGE}"
