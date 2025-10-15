@@ -99,8 +99,6 @@ spec:
         - /bin/kindnetd
         - --hostname-override=$(NODE_NAME)
         - --network-policy=true
-        - --admin-network-policy=false
-        - --baseline-admin-network-policy=false
         - --masquerading=true
         - --dns-caching=true
         - --disable-cni=false

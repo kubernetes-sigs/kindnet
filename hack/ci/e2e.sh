@@ -217,7 +217,7 @@ install_kindnet() {
   # Load the image into kind
   kind load docker-image "$IMAGE_NAME":test
    # Install kindnet
-  _install=$(sed s#"$IMAGE_NAME".*#"$IMAGE_NAME":test# < ./install.yaml)
+  _install=$(sed s#"$IMAGE_NAME".*#"$IMAGE_NAME":test# < ./install-kindnet.yaml)
   printf '%s' "${_install}" | kubectl apply -f -
   kubectl wait --for=condition=ready pods --namespace=kube-system -l k8s-app=kindnet
 }
