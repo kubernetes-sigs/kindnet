@@ -3,7 +3,7 @@
 ## Overview
 
 If you want to try Kubernetes with IPv6 you can have a working IPv6 cluster using
- then [kindnet CNI plugin](https://github.com/aojea/kindnet)
+ then [kindnet CNI plugin](https://sigs.k8s.io/kindnet)
 
 To test it we can use the [kind project](https://github.com/kubernetes-sigs/kind)
 to create a Docker in Docker Kubernetes cluster in your host.
