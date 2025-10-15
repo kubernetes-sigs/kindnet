@@ -28,7 +28,7 @@ update:
 	hack/update-license-header.sh
 
 # get image name from directory we're building
-IMAGE_NAME=kindnetd
+IMAGE_NAME=kindnet
 # docker image registry, default to upstream
 REGISTRY?=gcr.io/k8s-staging-networking
 # tag based on date-sha
