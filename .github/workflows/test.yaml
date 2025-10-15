@@ -2,11 +2,6 @@ name: Test
 
 on: [push, pull_request]
 
-env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: aojea/kindnetd
-permissions: write-all
-
 jobs:
   test:
     strategy:
