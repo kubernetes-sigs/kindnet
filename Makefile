@@ -28,9 +28,9 @@ update:
 	hack/update-license-header.sh
 
 # get image name from directory we're building
-IMAGE_NAME=kindnetd
+IMAGE_NAME=kindnet
 # docker image registry, default to upstream
-REGISTRY?=ghcr.io/aojea
+REGISTRY?=gcr.io/k8s-staging-networking
 # tag based on date-sha
 TAG?=$(shell echo "$$(date +v%Y%m%d)-$$(git describe --always --dirty)")
 # the full image tag
@@ -45,3 +45,12 @@ image-build:
 		--progress="${PROGRESS}" \
 		--platform="${PLATFORMS}" \
 		--tag="${IMAGE}" --load
+
+image-push:
+	docker buildx build . \
+		--progress="${PROGRESS}" \
+		--platform="${PLATFORMS}" \
+		--tag="${IMAGE}" --push
+
+release: build image-push
+	@echo "Released image: ${IMAGE}"

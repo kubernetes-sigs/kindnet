@@ -22,11 +22,11 @@ import (
 	"net/netip"
 	"time"
 
-	"github.com/aojea/kindnet/pkg/network"
 	"github.com/google/nftables"
 	"github.com/google/nftables/binaryutil"
 	"github.com/google/nftables/expr"
 	"golang.org/x/sys/unix"
+	"sigs.k8s.io/kindnet/pkg/network"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"

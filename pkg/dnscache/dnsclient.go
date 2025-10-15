@@ -24,10 +24,10 @@ import (
 	"strconv"
 	"syscall"
 
-	"github.com/aojea/kindnet/pkg/network"
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/sys/unix"
 	"k8s.io/klog/v2"
+	"sigs.k8s.io/kindnet/pkg/network"
 )
 
 // copy from https://go.dev/src/net/dnsclient_unix.go

@@ -27,12 +27,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aojea/kindnet/pkg/network"
 	"github.com/florianl/go-nfqueue"
 	"github.com/google/nftables"
 	"github.com/google/nftables/binaryutil"
 	"github.com/google/nftables/expr"
 	"github.com/mdlayher/netlink"
+	"sigs.k8s.io/kindnet/pkg/network"
 
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/sys/unix"
