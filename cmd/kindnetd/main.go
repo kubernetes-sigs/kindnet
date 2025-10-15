@@ -38,21 +38,21 @@ import (
 	"sigs.k8s.io/kindnet/pkg/nflog"
 	kindnetnode "sigs.k8s.io/kindnet/pkg/node"
 
+	"sigs.k8s.io/kube-network-policies/pkg/api"
+	"sigs.k8s.io/kube-network-policies/pkg/dataplane"
+	"sigs.k8s.io/kube-network-policies/pkg/networkpolicy"
+	"sigs.k8s.io/kube-network-policies/pkg/podinfo"
+
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/sys/unix"
 
+	"k8s.io/apimachinery/pkg/api/meta"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/client-go/informers"
-	v1 "k8s.io/client-go/informers/core/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	nodeutil "k8s.io/component-helpers/node/util"
 	"k8s.io/klog/v2"
-
-	"sigs.k8s.io/kube-network-policies/pkg/networkpolicy"
-	npaclient "sigs.k8s.io/network-policy-api/pkg/client/clientset/versioned"
-	npainformers "sigs.k8s.io/network-policy-api/pkg/client/informers/externalversions"
-	"sigs.k8s.io/network-policy-api/pkg/client/informers/externalversions/apis/v1alpha1"
 
 	_ "k8s.io/component-base/metrics/prometheus/clientgo" // load all the prometheus client-go plugin
 )
@@ -94,15 +94,15 @@ var (
 	metricsBindAddress         string
 	fastpathThreshold          int
 	disableCNI                 bool
+	disableNRI                 bool
 	nflogLevel                 int
 	ipsecOverlay               bool
 )
 
 func init() {
 	flag.BoolVar(&disableCNI, "disable-cni", false, "If set, disable the CNI functionality to add IPs to Pods and routing between nodes (default false)")
-	flag.BoolVar(&networkpolicies, "network-policy", true, "If set, enable Network Policies (default true)")
-	flag.BoolVar(&adminNetworkPolicy, "admin-network-policy", false, "If set, enable Admin Network Policies (default false)")
-	flag.BoolVar(&baselineAdminNetworkPolicy, "baseline-admin-network-policy", false, "If set, enable Baseline Admin Network Policies (default false)")
+	flag.BoolVar(&disableNRI, "disable-nri", false, "If set, disable the NRI functionality to get Pod IP information from the container runtime directly (default false)")
+	flag.BoolVar(&networkpolicies, "network-policy", true, "If set, enable Network Policy GA APIs (default true)")
 	flag.BoolVar(&dnsCaching, "dns-caching", true, "If set, enable Kubernetes DNS caching (default true)")
 	flag.BoolVar(&nat64, "nat64", true, "If set, enable NAT64 using the reserved prefix 64:ff9b::/96 on IPv6 only clusters (default true)")
 	flag.StringVar(&hostnameOverride, "hostname-override", "", "If non-empty, will be used as the name of the Node that kube-network-policies is running on. If unset, the node name is assumed to be the same as the node's hostname.")
@@ -157,7 +157,6 @@ func main() {
 	}
 
 	config.UserAgent = "kindnet"
-	npaConfig := config // shallow copy because CRDs does not support proto
 	// use protobuf for better performance at scale
 	// https://kubernetes.io/docs/reference/using-api/api-concepts/#alternate-representations-of-resources
 	config.AcceptContentTypes = "application/vnd.kubernetes.protobuf,application/json"
@@ -329,53 +328,90 @@ func main() {
 
 	// network policies
 	if networkpolicies {
-		cfg := networkpolicy.Config{
-			FailOpen:                   true,
-			QueueID:                    102,
-			NodeName:                   nodeName,
-			NFTableName:                "kindnet-network-policies",
-			NetfilterBug1766Fix:        true,
-			AdminNetworkPolicy:         adminNetworkPolicy,
-			BaselineAdminNetworkPolicy: baselineAdminNetworkPolicy,
+		dpConfig := dataplane.Config{
+			FailOpen:            true,
+			QueueID:             102,
+			NFTableName:         "kindnet-network-policies",
+			NetfilterBug1766Fix: true,
 		}
 
-		var npaClient *npaclient.Clientset
-		var npaInformerFactory npainformers.SharedInformerFactory
-		var nodeInformer v1.NodeInformer
-		if adminNetworkPolicy || baselineAdminNetworkPolicy {
-			nodeInformer = informersFactory.Core().V1().Nodes()
-			npaClient, err = npaclient.NewForConfig(npaConfig)
-			if err != nil {
-				klog.Fatalf("Failed to create Network client: %v", err)
+		nsInformer := informersFactory.Core().V1().Namespaces()
+		networkPolicyInfomer := informersFactory.Networking().V1().NetworkPolicies()
+		podInformer := informersFactory.Core().V1().Pods()
+		// Set the memory-saving transform function on the pod informer.
+		err = podInformer.Informer().SetTransform(func(obj interface{}) (interface{}, error) {
+			if accessor, err := meta.Accessor(obj); err == nil {
+				accessor.SetManagedFields(nil)
 			}
-			npaInformerFactory = npainformers.NewSharedInformerFactory(npaClient, 0)
+			return obj, nil
+		})
+		if err != nil {
+			klog.Fatalf("Failed to set pod informer transform: %v", err)
 		}
-		var anpInformer v1alpha1.AdminNetworkPolicyInformer
-		if adminNetworkPolicy {
-			anpInformer = npaInformerFactory.Policy().V1alpha1().AdminNetworkPolicies()
+		// Create the Pod IP resolvers.
+		// First, given an IP address they return the Pod name/namespace.
+		informerResolver, err := podinfo.NewInformerResolver(podInformer.Informer())
+		if err != nil {
+			klog.Fatalf("Failed to create informer resolver: %v", err)
 		}
-		var banpInformer v1alpha1.BaselineAdminNetworkPolicyInformer
-		if baselineAdminNetworkPolicy {
-			banpInformer = npaInformerFactory.Policy().V1alpha1().BaselineAdminNetworkPolicies()
+		resolvers := []podinfo.IPResolver{informerResolver}
+
+		// Create an NRI Pod IP resolver if enabled, since NRI connects to the container runtime
+		// the Pod and IP information is provided at the time the Pod Sandbox is created and before
+		// the containers start running, so policies can be enforced without race conditions.
+		if !disableNRI {
+			nriIPResolver, err := podinfo.NewNRIResolver(ctx, nodeName, nil)
+			if err != nil {
+				klog.Infof("failed to create NRI plugin, using apiserver information only: %v", err)
+			}
+			resolvers = append(resolvers, nriIPResolver)
 		}
 
-		networkPolicyController, err := networkpolicy.NewController(
-			clientset,
-			informersFactory.Networking().V1().NetworkPolicies(),
-			informersFactory.Core().V1().Namespaces(),
-			informersFactory.Core().V1().Pods(),
-			nodeInformer,
-			npaClient,
-			anpInformer,
-			banpInformer,
-			cfg)
-		if err != nil {
-			klog.Infof("Error creating network policy controller: %v, skipping network policies", err)
-		} else {
-			go func() {
-				_ = networkPolicyController.Run(ctx)
-			}()
+		// Create the pod info provider to obtain the Pod information
+		// necessary for the network policy evaluation, it uses the resolvers
+		// to obtain the key (Pod name and namespace) and use the informers to obtain
+		// the labels that are necessary to match the network policies.
+		podInfoProvider := podinfo.NewInformerProvider(
+			podInformer,
+			nsInformer,
+			nil,
+			resolvers)
+
+		// Create the evaluators for the Pipeline to process the packets
+		// and take a network policy action. The evaluators are processed
+		// by the order in the array.
+		evaluators := []api.PolicyEvaluator{}
+
+		// Logging evaluator must go first if enabled.
+		if klog.V(2).Enabled() {
+			evaluators = append(evaluators, networkpolicy.NewLoggingPolicy())
 		}
+
+		// Standard Network Policy goes after AdminNetworkPolicy and before BaselineAdminNetworkPolicy
+		evaluators = append(evaluators, networkpolicy.NewStandardNetworkPolicy(
+			nodeName,
+			nsInformer,
+			podInformer,
+			networkPolicyInfomer,
+		))
+
+		policyEngine := networkpolicy.NewPolicyEngine(podInfoProvider, evaluators)
+
+		// Start dataplane controller
+		networkPolicyController, err := dataplane.NewController(
+			policyEngine,
+			dpConfig,
+		)
+		if err != nil {
+			klog.ErrorS(err, "failed to create dataplane controller")
+			// It's better to crash loud
+			panic(err)
+		}
+		go func() {
+			if err := networkPolicyController.Run(ctx); err != nil {
+				utilruntime.HandleError(fmt.Errorf("dataplane controller failed: %w", err))
+			}
+		}()
 	}
 
 	// start conntrack metrics agent
