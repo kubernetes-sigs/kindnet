@@ -27,6 +27,10 @@ update:
 	gofmt -s -w ./
 	hack/update-license-header.sh
 
+.PHONY: ensure-buildx
+ensure-buildx:
+	./hack/init-buildx.sh
+
 # get image name from directory we're building
 IMAGE_NAME=kindnet
 # docker image registry, default to upstream
@@ -40,13 +44,13 @@ PROGRESS?=auto
 # required to enable buildx
 export DOCKER_CLI_EXPERIMENTAL=enabled
 
-image-build:
+image-build: ensure-buildx
 	docker buildx build . \
 		--progress="${PROGRESS}" \
 		--platform="${PLATFORMS}" \
 		--tag="${IMAGE}" --load
 
-image-push:
+image-push: ensure-buildx
 	docker buildx build . \
 		--progress="${PROGRESS}" \
 		--platform="${PLATFORMS}" \
