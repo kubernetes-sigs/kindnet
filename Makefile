@@ -52,5 +52,5 @@ image-push:
 		--platform="${PLATFORMS}" \
 		--tag="${IMAGE}" --push
 
-release: build image-push
+release: image-push
 	@echo "Released image: ${IMAGE}"

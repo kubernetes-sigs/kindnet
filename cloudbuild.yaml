@@ -7,5 +7,5 @@ steps:
   entrypoint: make
   env:
   - REGISTRY=gcr.io/k8s-staging-networking
-  - IMAGE_NAME=kube-network-policies
+  - IMAGE_NAME=kindnet
   args: ['release']
