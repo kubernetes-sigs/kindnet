@@ -37,8 +37,6 @@ IMAGE_NAME=kindnet
 REGISTRY?=gcr.io/k8s-staging-networking
 # tag based on date-sha
 TAG?=$(shell echo "$$(date +v%Y%m%d)-$$(git describe --always --dirty)")
-# the full image tag
-IMAGE?=$(REGISTRY)/$(IMAGE_NAME):$(TAG)
 PLATFORMS?=linux/amd64,linux/arm64
 PROGRESS?=auto
 # required to enable buildx
@@ -48,13 +46,13 @@ image-build: ensure-buildx
 	docker buildx build . \
 		--progress="${PROGRESS}" \
 		--platform="${PLATFORMS}" \
-		--tag="${IMAGE}" --load
+		--tag="$(REGISTRY)/$(IMAGE_NAME):$(TAG)" --load
 
 image-push: ensure-buildx
 	docker buildx build . \
 		--progress="${PROGRESS}" \
 		--platform="${PLATFORMS}" \
-		--tag="${IMAGE}" --push
+		--tag="$(REGISTRY)/$(IMAGE_NAME):$(TAG)" --push
 
 release: image-push
-	@echo "Released image: ${IMAGE}"
+	@echo "Released image: $(REGISTRY)/$(IMAGE_NAME):$(TAG)"
