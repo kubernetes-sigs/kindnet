@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"syscall"
 	"unsafe"
+
+	"k8s.io/klog/v2"
 )
 
 const (
@@ -54,8 +56,12 @@ func ethtool(iface string, cmd, val uint32) (retval uint32, err error) {
 	if err != nil {
 		return 0, err
 	}
-	defer syscall.Close(socket)
 
+	defer func() {
+		if err := syscall.Close(socket); err != nil {
+			klog.V(4).Infof("failed to close ethtool socket: %v", err)
+		}
+	}()
 	// prepare ethtool request
 	value := ethtoolValue{cmd, val}
 	request := ifreq{Data: uintptr(unsafe.Pointer(&value))}

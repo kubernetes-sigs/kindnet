@@ -177,7 +177,12 @@ func (d *DNSCacheAgent) Run(ctx context.Context) error {
 		logger.Info("could not open nfqueue socket", "error", err)
 		return err
 	}
-	defer nf.Close()
+
+	defer func() {
+		if err := nf.Close(); err != nil {
+			klog.V(4).Infof("failed to close nfqueue: %v", err)
+		}
+	}()
 
 	d.nfq = nf
 
@@ -271,8 +276,12 @@ func printNfnetlinkQueueStats() {
 		klog.Infof("can not get nfqueue stats: %v", err)
 		return
 	}
-	defer f.Close()
 
+	defer func() {
+		if err := f.Close(); err != nil {
+			klog.V(4).Infof("failed to close nfqueue stats file: %v", err)
+		}
+	}()
 	reader := io.LimitReader(f, maxBufferSize)
 
 	scanner := bufio.NewScanner(reader)

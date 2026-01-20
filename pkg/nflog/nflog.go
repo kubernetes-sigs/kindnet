@@ -62,7 +62,12 @@ func (n *NFLogAgent) Run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("could not open nflog socket: %v", err)
 	}
-	defer nf.Close()
+
+	defer func() {
+		if err := nf.Close(); err != nil {
+			klog.V(4).Infof("failed to close nflog socket: %v", err)
+		}
+	}()
 
 	// Avoid receiving ENOBUFS errors.
 	if err := nf.SetOption(netlink.NoENOBUFS, true); err != nil {
