@@ -1,24 +1,21 @@
 # Copyright 2025 Antonio Ojea
 # SPDX-License-Identifier: Apache-2.0
+version: 2
 
 run:
   timeout: 30m
   tests: false # TODO lint tests too
 
 linters:
-  disable-all: true
+  default: none
   enable:
     - gocritic
-    - gosimple
     - govet
     - errcheck
     - ineffassign
     - staticcheck
-    - stylecheck
-    - typecheck
 
 formatters:
-  disable-all: true
   enable:
     - goimports
     - gofmt

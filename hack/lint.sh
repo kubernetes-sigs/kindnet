@@ -19,7 +19,7 @@ set -o nounset
 set -o pipefail
 
 REPO_ROOT=$(dirname "${BASH_SOURCE[0]}")/..
-VERSION=v1.64.7
+VERSION=v2.7.2
 
 cd $REPO_ROOT
 docker run --rm -v $(pwd):/app -w /app golangci/golangci-lint:${VERSION} golangci-lint run -v
