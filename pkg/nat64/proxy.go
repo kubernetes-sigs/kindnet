@@ -403,7 +403,7 @@ func handleUDPConn(origAddr *net.UDPAddr, dstAddr *net.UDPAddr, data []byte) {
 	// assume 64:ff9b::/96 and last 4 digits
 	// https://www.rfc-editor.org/rfc/rfc6052.html
 	ip4 := ip4in6[12:16]
-	dstV4Addr := fmt.Sprintf("%s:%d", ip4.String(), dstAddr.Port)
+	dstV4Addr := net.JoinHostPort(ip4.String(), strconv.Itoa(dstAddr.Port))
 	klog.V(4).Infof("Connecting to %s", dstV4Addr)
 	remoteConn, err := net.Dial("udp", dstV4Addr)
 	if err != nil {
