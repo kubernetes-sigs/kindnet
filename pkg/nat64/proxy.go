@@ -92,8 +92,11 @@ func (n *NAT64Agent) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-
+	defer func() {
+		if err := conn.Close(); err != nil {
+			klog.V(4).Infof("failed to close UDP listener: %v", err)
+		}
+	}()
 	klog.V(2).Infof("listening on UDP %s", conn.LocalAddr().String())
 	_, port, err := net.SplitHostPort(conn.LocalAddr().String())
 	if err != nil {
@@ -138,7 +141,12 @@ func (n *NAT64Agent) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer tcpListener.Close()
+
+	defer func() {
+		if err := tcpListener.Close(); err != nil {
+			klog.V(4).Infof("failed to close TCP listener: %v", err)
+		}
+	}()
 
 	klog.V(2).Infof("listening on TCP %s", tcpListener.Addr().String())
 	_, port, err = net.SplitHostPort(tcpListener.Addr().String())
@@ -341,8 +349,11 @@ func CleanRules() {
 }
 
 func handleTCPConn(conn net.Conn) {
-	defer conn.Close()
-
+	defer func() {
+		if err := conn.Close(); err != nil {
+			klog.V(4).Infof("failed to close TCP connection: %v", err)
+		}
+	}()
 	host, port, err := net.SplitHostPort(conn.LocalAddr().String())
 	if err != nil {
 		klog.V(2).Infof("Failed to get remote address [%s]: %v", conn.LocalAddr().String(), err)
@@ -363,8 +374,11 @@ func handleTCPConn(conn net.Conn) {
 		klog.V(2).Infof("Failed to connect to original destination [%s]: %s", conn.LocalAddr().String(), err)
 		return
 	}
-	defer remoteConn.Close()
-
+	defer func() {
+		if err := conn.Close(); err != nil {
+			klog.V(4).Infof("failed to close remote TCP connection: %v", err)
+		}
+	}()
 	var streamWait sync.WaitGroup
 	streamWait.Add(2)
 
@@ -396,8 +410,11 @@ func handleUDPConn(origAddr *net.UDPAddr, dstAddr *net.UDPAddr, data []byte) {
 		klog.V(2).Infof("Failed to connect to original destination %s: %v", dstV4Addr, err)
 		return
 	}
-	defer remoteConn.Close()
-
+	defer func() {
+		if err := remoteConn.Close(); err != nil {
+			klog.V(4).Infof("failed to close remote TCP connection: %v", err)
+		}
+	}()
 	n, err := remoteConn.Write(data)
 	if err != nil {
 		klog.V(2).Infof("Fail to write to remote %s: %s", remoteConn.RemoteAddr(), err)

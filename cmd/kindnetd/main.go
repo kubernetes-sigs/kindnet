@@ -452,7 +452,12 @@ func checkHTTP(address string) bool {
 	if err != nil {
 		return false
 	}
-	defer resp.Body.Close()
+
+	defer func() {
+		if err := resp.Body.Close(); err != nil {
+			klog.ErrorS(err, "failed to close response body")
+		}
+	}()
 
 	_, err = io.ReadAll(resp.Body)
 	if err != nil {

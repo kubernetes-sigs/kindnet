@@ -93,7 +93,12 @@ func parseResolvConf(resolvPath string) (nameservers []string, searches []string
 		klog.ErrorS(err, "Could not open resolv conf file.", "path", resolvPath)
 		return nil, nil, nil, err
 	}
-	defer f.Close()
+
+	defer func() {
+		if cerr := f.Close(); cerr != nil {
+			klog.V(4).Infof("failed to close resolv conf file %s: %v", resolvPath, cerr)
+		}
+	}()
 
 	file, err := utilio.ReadAtMost(f, maxResolvConfLength)
 	if err != nil {

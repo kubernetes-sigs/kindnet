@@ -76,7 +76,13 @@ func WriteCNIConfig(ranges []string) (err error) {
 
 	f1, err := os.Open(cniFile)
 	if err == nil {
-		defer f1.Close()
+
+		defer func() {
+			if cerr := f1.Close(); cerr != nil {
+				klog.V(4).Infof("failed to close %s: %v", cniFile, cerr)
+			}
+		}()
+
 		// Calculate the MD5 checksum of the existing file
 		h1 := md5.New()
 		if _, err := io.Copy(h1, f1); err != nil {

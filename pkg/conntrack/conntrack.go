@@ -58,7 +58,12 @@ func StartConntrackMetricsAgent(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer statsConn.Close()
+
+	defer func() {
+		if err := statsConn.Close(); err != nil {
+			klog.V(4).Infof("failed to close conntrack stats conn: %v", err)
+		}
+	}()
 
 	// Start a goroutine to process all conntrack stats.
 	go func() {
@@ -111,7 +116,13 @@ func StartConntrackMetricsAgent(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer eventsConn.Close()
+
+	defer func() {
+		if err := eventsConn.Close(); err != nil {
+			klog.V(4).Infof("failed to close conntrack events conn: %v", err)
+		}
+	}()
+
 	// reference https://lore.kernel.org/netdev/49C789F4.4050906@trash.net/T/#mfa68b0c462d1342869f4a2a152285910220f72bc
 	err = eventsConn.SetOption(netlink.BroadcastError, true)
 	if err != nil {
