@@ -113,7 +113,7 @@ func (p *ConnectionPool) Put(conn *net.TCPConn) {
 		p.mu.Lock()
 		defer p.mu.Unlock()
 		p.activeConns--
-		conn.Close()
+		_ = conn.Close()
 	}
 }
 
@@ -138,6 +138,6 @@ func (p *ConnectionPool) newConnection(address string) (*net.TCPConn, error) {
 // Close closes all connections in the pool.
 func (p *ConnectionPool) Close() {
 	for conn := range p.conns {
-		conn.Close()
+		_ = conn.Close()
 	}
 }
