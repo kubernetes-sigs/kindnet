@@ -14,7 +14,7 @@ require (
 	github.com/google/nftables v0.3.0
 	github.com/mdlayher/netlink v1.8.0
 	github.com/prometheus/client_golang v1.23.2
-	github.com/ti-mo/conntrack v0.5.2
+	github.com/ti-mo/conntrack v0.6.0
 	github.com/ti-mo/netfilter v0.5.3
 	github.com/vishvananda/netlink v1.3.1
 	k8s.io/api v0.34.1
