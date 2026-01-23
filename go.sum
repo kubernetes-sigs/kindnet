@@ -53,8 +53,8 @@ github.com/emicklei/go-restful/v3 v3.12.2 h1:DhwDP0vY3k8ZzE0RunuJy8GhNpPL6zqLkDf
 github.com/emicklei/go-restful/v3 v3.12.2/go.mod h1:6n3XBCmQQb25CM2LCACGz8ukIrRry+4bhvbpWn3mrbc=
 github.com/felixge/httpsnoop v1.0.4 h1:NFTV2Zj1bL4mc9sqWACXbQFVBBg2W3GPvqp8/ESS2Wg=
 github.com/felixge/httpsnoop v1.0.4/go.mod h1:m8KPJKqk1gH5J9DgRY2ASl2lWCfGKXixSwevea8zH2U=
-github.com/florianl/go-nflog/v2 v2.1.0 h1:yXvA/ZWMS2dXBBM364xOEaW4WX14RjvsGCVt+y9O0ZM=
-github.com/florianl/go-nflog/v2 v2.1.0/go.mod h1:U8o3DfjAAIMuW3/IHS3KmTccSMLyRbr09dImALuwEI8=
+github.com/florianl/go-nflog/v2 v2.2.0 h1:25c3fv77e7j5Nr1uLPdvXNHDQpfkbWsfWhg0JYUJQnI=
+github.com/florianl/go-nflog/v2 v2.2.0/go.mod h1:n6j0kC+qiMz7vsUeFmfB1pInaDSXDO2RFT2C2U/Z81w=
 github.com/florianl/go-nfqueue v1.3.2 h1:8DPzhKJHywpHJAE/4ktgcqveCL7qmMLsEsVD68C4x4I=
 github.com/florianl/go-nfqueue v1.3.2/go.mod h1:eSnAor2YCfMCVYrVNEhkLGN/r1L+J4uDjc0EUy0tfq4=
 github.com/fxamacker/cbor/v2 v2.9.0 h1:NpKPmjDBgUfBms6tr6JZkTHtfFGcMKsw3eGcmD/sapM=
