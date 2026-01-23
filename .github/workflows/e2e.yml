@@ -25,13 +25,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Set up Go
-      uses: actions/setup-go@v6
+      uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5 # v6
       with:
         go-version: ${{ env.GO_VERSION }}
       id: go
 
     - name: Check out code
-      uses: actions/checkout@v6
+      uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
 
     - name: Build
       run: |
@@ -39,7 +39,7 @@ jobs:
         mkdir _output
         docker save registry.k8s.io/networking/kindnet:test  > _output/kindnet-image.tar
 
-    - uses: actions/upload-artifact@v4
+    - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
         name: test-image
         path: _output/kindnet-image.tar
@@ -60,7 +60,7 @@ jobs:
       IP_FAMILY: ${{ matrix.ipFamily }}
     steps:
     - name: Check out code
-      uses: actions/checkout@v6
+      uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6
 
     - name: Enable ipv4 and ipv6 forwarding
       run: |
@@ -111,7 +111,7 @@ jobs:
         # dump the kubeconfig for later
         /usr/local/bin/kind get kubeconfig --name ${{ env.KIND_CLUSTER_NAME}} > _artifacts/kubeconfig.conf
 
-    - uses: actions/download-artifact@v6
+    - uses: actions/download-artifact@018cc2cf5baa6db3ef3c5f8a56943fffe632ef53 # v6
       with:
         name: test-image
 
@@ -179,7 +179,7 @@ jobs:
 
     - name: Upload Junit Reports
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
         name: kind-junit-${{ env.JOB_NAME }}-${{ github.run_id }}
         path: './_artifacts/*.xml'
@@ -191,7 +191,7 @@ jobs:
 
     - name: Upload logs
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
       with:
         name: kind-logs-${{ env.JOB_NAME }}-${{ github.run_id }}
         path: ./_artifacts/logs
