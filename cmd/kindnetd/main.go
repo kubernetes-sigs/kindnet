@@ -28,6 +28,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	"sigs.k8s.io/kindnet/pkg/conntrack"
@@ -97,13 +98,15 @@ var (
 	disableNRI                 bool
 	nflogLevel                 int
 	ipsecOverlay               bool
+	nameServers                string
 )
 
 func init() {
 	flag.BoolVar(&disableCNI, "disable-cni", false, "If set, disable the CNI functionality to add IPs to Pods and routing between nodes (default false)")
 	flag.BoolVar(&disableNRI, "disable-nri", false, "If set, disable the NRI functionality to get Pod IP information from the container runtime directly (default false)")
 	flag.BoolVar(&networkpolicies, "network-policy", true, "If set, enable Network Policy GA APIs (default true)")
-	flag.BoolVar(&dnsCaching, "dns-caching", true, "If set, enable Kubernetes DNS caching (default true)")
+	flag.BoolVar(&dnsCaching, "dns-caching", false, "If set, enable Kubernetes DNS caching (default false)")
+	flag.StringVar(&nameServers, "dns-caching-nameservers", "", "Comma seperated list of DNS servers to use for DNS caching.")
 	flag.BoolVar(&nat64, "nat64", true, "If set, enable NAT64 using the reserved prefix 64:ff9b::/96 on IPv6 only clusters (default true)")
 	flag.StringVar(&hostnameOverride, "hostname-override", "", "If non-empty, will be used as the name of the Node that kube-network-policies is running on. If unset, the node name is assumed to be the same as the node's hostname.")
 	flag.BoolVar(&masquerading, "masquerading", true, "masquerade with the Node IP the cluster to external traffic (default true)")
@@ -279,7 +282,17 @@ func main() {
 	// create a dnsCacheAgent
 	if dnsCaching {
 		klog.Infof("caching DNS cluster traffic")
-		dnsCacheAgent, err := dnscache.NewDNSCacheAgent(nodeName, nodeInformer)
+		var nameServersList []string
+		if nameServers != "" {
+			nameServersList = strings.Split(nameServers, ",")
+		}
+		for _, ns := range nameServersList {
+			_, err := netip.ParseAddr(ns)
+			if err != nil {
+				klog.Fatalf("can not parse ip %s , invalid nameserver: %v", ns, err)
+			}
+		}
+		dnsCacheAgent, err := dnscache.NewDNSCacheAgent(nodeName, nameServersList, nodeInformer)
 		if err != nil {
 			klog.Fatalf("error creating dnsCacheAgent agent: %v", err)
 		}
