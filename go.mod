@@ -25,7 +25,6 @@ require (
 	k8s.io/cri-api v0.34.1
 	k8s.io/cri-client v0.34.1
 	k8s.io/klog/v2 v2.130.1
-	k8s.io/kubelet v0.34.1
 	sigs.k8s.io/kube-network-policies v0.9.2
 )
 
@@ -55,7 +54,6 @@ require (
 	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.26.3 // indirect
-	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/knqyf263/go-plugin v0.9.0 // indirect
 	github.com/mdlayher/socket v0.5.1 // indirect
 	github.com/opencontainers/runtime-spec v1.2.1 // indirect
@@ -65,7 +63,6 @@ require (
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
-	github.com/spf13/cobra v1.9.1 // indirect
 	github.com/spf13/pflag v1.0.6 // indirect
 	github.com/tetratelabs/wazero v1.9.0 // indirect
 	github.com/x448/float16 v0.8.4 // indirect
