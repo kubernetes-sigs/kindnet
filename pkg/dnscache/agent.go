@@ -62,11 +62,12 @@ const (
 
 // NewDNSCacheAgent caches all DNS traffic from Pods with network based on the PodCIDR of the node they are running.
 // Cache logic is very specific to Kubernetes,
-func NewDNSCacheAgent(nodeName string, nodeInformer coreinformers.NodeInformer) (*DNSCacheAgent, error) {
+func NewDNSCacheAgent(nodeName string, nameServersList []string, nodeInformer coreinformers.NodeInformer) (*DNSCacheAgent, error) {
 	d := &DNSCacheAgent{
 		nodeName:    nodeName,
 		nodeLister:  nodeInformer.Lister(),
 		nodesSynced: nodeInformer.Informer().HasSynced,
+		nameServers: nameServersList,
 		interval:    5 * time.Minute,
 		cache:       newIPCache(),
 		tcpPool:     NewPools(),
@@ -83,11 +84,9 @@ type DNSCacheAgent struct {
 	nodesSynced cache.InformerSynced
 	interval    time.Duration
 
-	podCIDRv4     string
-	podCIDRv6     string
-	nameServers   []string
-	searches      []string
-	clusterDomain string
+	podCIDRv4   string
+	podCIDRv6   string
+	nameServers []string
 
 	nfq *nfqueue.Nfqueue
 
@@ -121,36 +120,6 @@ func (d *DNSCacheAgent) Run(ctx context.Context) error {
 	})
 	if err != nil {
 		return fmt.Errorf("failed to get Node PodCIDRs: %w", err)
-	}
-
-	// kubelet config clusterDNS
-	// clusterDNS is a list of IP addresses for the cluster DNS server.
-	// If set, kubelet will configure all containers to use this for DNS resolution instead of the host's DNS servers.
-
-	klog.Info("Configuring upstream DNS resolver")
-	kubeletConfig, err := getKubeletConfigz(ctx, d.nodeName)
-	if err != nil {
-		klog.ErrorS(err, "Could not obtain local Kubelet config")
-		return err
-	}
-	klog.InfoS("Obtained DNS config from kubelet", "nameservers", kubeletConfig.ClusterDNS, "search", kubeletConfig.ClusterDomain, "resolver", kubeletConfig.ResolverConfig)
-
-	if len(kubeletConfig.ClusterDNS) > 0 {
-		d.nameServers = kubeletConfig.ClusterDNS
-	}
-
-	d.clusterDomain = kubeletConfig.ClusterDomain
-	resolvPath := "/etc/resolv.conf"
-	if kubeletConfig.ResolverConfig != nil {
-		resolvPath = *kubeletConfig.ResolverConfig
-	}
-
-	hostDNS, hostSearch, hostOptions, err := parseResolvConf(resolvPath)
-	if err != nil {
-		klog.ErrorS(err, "Could not parse resolv conf file", "path", resolvPath)
-	} else {
-		d.searches = hostSearch
-		klog.Infof("Resolv.conf from %s: nameservers: %v search: %v options: %v", resolvPath, hostDNS, hostSearch, hostOptions)
 	}
 
 	// https://netfilter.org/projects/libnetfilter_queue/doxygen/html/group__Queue.html

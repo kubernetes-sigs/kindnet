@@ -13,13 +13,6 @@ rules:
       - watch
       - patch
   - apiGroups:
-      - ""
-    resources:
-      - nodes/proxy
-      - nodes/configz
-    verbs:
-      - get
-  - apiGroups:
      - ""
     resources:
       - configmaps
@@ -102,7 +95,7 @@ spec:
         - --admin-network-policy=false
         - --baseline-admin-network-policy=false
         - --masquerading=true
-        - --dns-caching=true
+        - --dns-caching=false
         - --disable-cni=false
         - --fastpath-threshold=20
         - --ipsec-overlay=false
