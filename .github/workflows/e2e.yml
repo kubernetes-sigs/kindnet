@@ -39,7 +39,7 @@ jobs:
         mkdir _output
         docker save registry.k8s.io/networking/kindnet:test  > _output/kindnet-image.tar
 
-    - uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+    - uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
       with:
         name: test-image
         path: _output/kindnet-image.tar
@@ -179,7 +179,7 @@ jobs:
 
     - name: Upload Junit Reports
       if: always()
-      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+      uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
       with:
         name: kind-junit-${{ env.JOB_NAME }}-${{ github.run_id }}
         path: './_artifacts/*.xml'
@@ -191,7 +191,7 @@ jobs:
 
     - name: Upload logs
       if: always()
-      uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6
+      uses: actions/upload-artifact@bbbca2ddaa5d8feaa63e36b76fdaad77386f024f # v7.0.0
       with:
         name: kind-logs-${{ env.JOB_NAME }}-${{ github.run_id }}
         path: ./_artifacts/logs
