@@ -16,6 +16,9 @@ updates:
       aws:
         patterns:
           - "github.com/aws/*"
+      golangx:
+        patterns:
+          - "golang.org/x/*"
     labels:
       - "area/dependency"
       - "ok-to-test"
