@@ -12,7 +12,7 @@ require (
 	github.com/florianl/go-nfqueue v1.3.2
 	github.com/google/go-cmp v0.7.0
 	github.com/google/nftables v0.3.0
-	github.com/mdlayher/netlink v1.10.1-0.20260410153103-1ae4967fba36
+	github.com/mdlayher/netlink v1.11.0
 	github.com/prometheus/client_golang v1.23.2
 	github.com/ti-mo/conntrack v0.6.0
 	github.com/ti-mo/netfilter v0.5.3
