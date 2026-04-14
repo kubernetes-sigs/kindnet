@@ -103,7 +103,7 @@ require (
 	github.com/vishvananda/netns v0.0.5
 	golang.org/x/net v0.52.0
 	golang.org/x/oauth2 v0.30.0 // indirect
-	golang.org/x/sys v0.42.0
+	golang.org/x/sys v0.43.0
 	golang.org/x/term v0.41.0 // indirect
 	golang.org/x/text v0.35.0 // indirect
 	golang.org/x/time v0.14.0
