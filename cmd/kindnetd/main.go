@@ -128,6 +128,8 @@ func main() {
 	// enable logging
 	klog.InitFlags(nil)
 	_ = flag.Set("logtostderr", "true")
+	_ = flag.Set("legacy_stderr_threshold_behavior", "false")
+	_ = flag.Set("stderrthreshold", "INFO")
 	flag.Parse()
 	flag.VisitAll(func(flag *flag.Flag) {
 		klog.Infof("FLAG: --%s=%q", flag.Name, flag.Value)
