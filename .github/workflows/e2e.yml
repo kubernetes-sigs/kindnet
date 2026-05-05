@@ -14,7 +14,6 @@ on:
   workflow_dispatch:
 
 env:
-  GO_VERSION: "1.25"
   K8S_VERSION: "v1.34.0"
   KIND_VERSION: "v0.30.0"
   KIND_CLUSTER_NAME: "kindnet"
@@ -24,14 +23,13 @@ jobs:
     name: build
     runs-on: ubuntu-latest
     steps:
+    - name: Check out code
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
     - name: Set up Go
       uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
       with:
-        go-version: ${{ env.GO_VERSION }}
-      id: go
-
-    - name: Check out code
-      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        go-version-file: .go-version
 
     - name: Build
       run: |
