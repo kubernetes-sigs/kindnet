@@ -18,6 +18,9 @@ env:
   KIND_VERSION: "v0.30.0"
   KIND_CLUSTER_NAME: "kindnet"
 
+permissions:
+  contents: read
+
 jobs:
   build:
     name: build
