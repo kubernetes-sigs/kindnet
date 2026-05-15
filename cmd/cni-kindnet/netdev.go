@@ -188,6 +188,13 @@ func createPodInterface(netconf *NetworkConfig) error {
 		return fmt.Errorf("failed to set interface %s up: %v", oofName, err)
 	}
 
+	// Wait until the container-side veth is operationally up before adding routes.
+	// A veth reaches OperStateUp only once both ends are up, at which point the
+	// kernel's IPv6 stack is fully initialized and route additions will not race.
+	if err = waitForLinkOperational(nhNs, nsLink.Attrs().Index); err != nil {
+		return fmt.Errorf("interface %s did not become operational: %w", iifName, err)
+	}
+
 	// Configure addresses and routes
 	if netconf.IPv4 != nil {
 		// add the Pod address as a /32 inside the namespace and use the "onlink" flag on the
@@ -212,9 +219,6 @@ func createPodInterface(netconf *NetworkConfig) error {
 			Dst:       addressGw.IPNet,
 		}
 
-		// TODO: investigate how to make this more resilient
-		// CNI ADD command failed: fail to create veth interface: could not add route {Ifindex: 43656 Dst: 2001:db8::7775:5443:1309:8685/128 Src: 2001:db8:: Gw: <nil> Flags: [] Table: 0 Realm: 0} on the host to the container interface knetb3773c91 : invalid argument
-		time.Sleep(10 * time.Millisecond)
 		if err := nhNs.RouteAdd(&routeToGateway); err != nil {
 			return fmt.Errorf("could not add route to default gw on namespace %s : %w", netconf.NetNS, err)
 		}
@@ -254,10 +258,19 @@ func createPodInterface(netconf *NetworkConfig) error {
 			return fmt.Errorf("could not add address %s on namespace %s : %w", netconf.IPv6.String(), netconf.NetNS, err)
 		}
 
-		addressGw := &netlink.Addr{IPNet: &net.IPNet{IP: netconf.GWv6, Mask: net.CIDRMask(128, 128)}}
+		addressGw := &netlink.Addr{
+			IPNet: &net.IPNet{IP: netconf.GWv6, Mask: net.CIDRMask(128, 128)},
+			Flags: unix.IFA_F_PERMANENT,
+		}
 		err = nhRoot.AddrAdd(hostLink, addressGw)
 		if err != nil {
 			return fmt.Errorf("could not add address %s on interface %s : %w", netconf.GWv6.String(), oofName, err)
+		}
+		// The host-side route uses Src: GWv6; the kernel validates that GWv6
+		// has a local route (table 255) before accepting it. Wait until that
+		// local route is visible before proceeding.
+		if err = waitForLocalAddr(nhRoot, netconf.GWv6); err != nil {
+			return fmt.Errorf("gateway address %s not ready on host: %w", netconf.GWv6.String(), err)
 		}
 
 		// set the route from the network namespace to the host
@@ -267,9 +280,6 @@ func createPodInterface(netconf *NetworkConfig) error {
 			Dst:       addressGw.IPNet,
 		}
 
-		// TODO: investigate how to make this more resilient
-		// CNI ADD command failed: fail to create veth interface: could not add route {Ifindex: 43656 Dst: 2001:db8::7775:5443:1309:8685/128 Src: 2001:db8:: Gw: <nil> Flags: [] Table: 0 Realm: 0} on the host to the container interface knetb3773c91 : invalid argument
-		time.Sleep(10 * time.Millisecond)
 		if err := nhNs.RouteAdd(&routeToGateway); err != nil {
 			return fmt.Errorf("could not add route to default gw on namespace %s : %w", netconf.NetNS, err)
 		}
@@ -296,6 +306,47 @@ func createPodInterface(netconf *NetworkConfig) error {
 		}
 	}
 	return nil
+}
+
+// waitForLocalAddr polls RouteGet using nh until the kernel has added a local
+// route for addr (type RTN_LOCAL), confirming the address is fully committed
+// to the kernel's routing tables and usable as a route preferred source.
+// RouteGet is a targeted lookup (not a dump) so it is reliable under concurrent
+// netlink load. Times out after one second.
+func waitForLocalAddr(nh *netlink.Handle, addr net.IP) error {
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		routes, err := nh.RouteGet(addr)
+		if err == nil {
+			for _, r := range routes {
+				if r.Type == unix.RTN_LOCAL {
+					return nil
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return fmt.Errorf("local route for %s not ready after 1s", addr)
+}
+
+// waitForLinkOperational polls the link at linkIdx using nh until it reaches
+// OperStateUp, indicating the kernel's networking stack (including IPv6) is
+// fully initialized and ready for route additions. For veth pairs this state
+// is reached only once both ends are up, so callers should bring both ends up
+// before calling this. Times out after one second.
+func waitForLinkOperational(nh *netlink.Handle, linkIdx int) error {
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		link, err := nh.LinkByIndex(linkIdx)
+		if err != nil {
+			return err
+		}
+		if link.Attrs().OperState == netlink.LinkOperState(netlink.OperUp) {
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return fmt.Errorf("timed out waiting for link index %d to become operational", linkIdx)
 }
 
 func deletePodInterface(ifName string, netNS string) error {
