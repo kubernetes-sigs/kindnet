@@ -106,6 +106,6 @@ func WriteCNIConfig(ranges []string) (err error) {
 		_ = os.Remove(cniFile)
 		return err
 	}
-	klog.Infof("CNI config file succesfully written")
+	klog.Infof("CNI config file successfully written")
 	return nil
 }
