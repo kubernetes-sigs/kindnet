@@ -22,10 +22,12 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
 
 	"github.com/vishvananda/netlink"
 	"golang.org/x/net/ipv4"
@@ -43,26 +45,338 @@ type MulticastAgent struct {
 	// upstreamIfIndex is the interface index of the host's default gateway interface
 	upstreamIfIndex int
 	upstreamName    string
+
+	// Low-level multicast routing sockets
+	mcastSocket4 int
+	mcastSocket6 int
+
+	// VIF tracking
+	vifMap  map[string]uint16
+	vifUsed [32]bool
 }
 
 func NewMulticastAgent() (*MulticastAgent, error) {
 	return &MulticastAgent{
 		groupToIfaces: make(map[string]map[string]bool),
 		activeJoins:   make(map[string]interface{}),
+		vifMap:        make(map[string]uint16),
 	}, nil
+}
+
+func (ma *MulticastAgent) initSockets() error {
+	// Initialize sysctls first
+	_ = os.WriteFile("/proc/sys/net/ipv4/conf/all/rp_filter", []byte("0"), 0644)
+	_ = os.WriteFile("/proc/sys/net/ipv4/conf/default/rp_filter", []byte("0"), 0644)
+
+	// IPv4 Socket
+	fd4, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_RAW, syscall.IPPROTO_IGMP)
+	if err != nil {
+		return fmt.Errorf("failed to open raw IPv4 IGMP socket: %w", err)
+	}
+	ma.mcastSocket4 = fd4
+
+	// Enable IPv4 multicast routing
+	if err := unix.SetsockoptInt(fd4, unix.IPPROTO_IP, MRT_INIT, 1); err != nil {
+		_ = syscall.Close(fd4)
+		ma.mcastSocket4 = 0
+		return fmt.Errorf("failed to initialize IPv4 multicast routing (MRT_INIT): %w", err)
+	}
+
+	// IPv6 Socket
+	fd6, err := syscall.Socket(syscall.AF_INET6, syscall.SOCK_RAW, syscall.IPPROTO_ICMPV6)
+	if err != nil {
+		klog.Warningf("failed to open raw IPv6 ICMPv6 socket: %v", err)
+	} else {
+		ma.mcastSocket6 = fd6
+		// Enable IPv6 multicast routing
+		if err := unix.SetsockoptInt(fd6, unix.IPPROTO_IPV6, MRT6_INIT, 1); err != nil {
+			_ = syscall.Close(fd6)
+			ma.mcastSocket6 = 0
+			klog.Warningf("failed to initialize IPv6 multicast routing (MRT6_INIT): %v", err)
+		}
+	}
+	return nil
+}
+
+func (ma *MulticastAgent) cleanupSockets() {
+	ma.Lock()
+	defer ma.Unlock()
+
+	if ma.mcastSocket4 != 0 {
+		_ = unix.SetsockoptInt(ma.mcastSocket4, unix.IPPROTO_IP, MRT_DONE, 0)
+		_ = syscall.Close(ma.mcastSocket4)
+		ma.mcastSocket4 = 0
+	}
+	if ma.mcastSocket6 != 0 {
+		_ = unix.SetsockoptInt(ma.mcastSocket6, unix.IPPROTO_IPV6, MRT6_DONE, 0)
+		_ = syscall.Close(ma.mcastSocket6)
+		ma.mcastSocket6 = 0
+	}
+}
+
+func (ma *MulticastAgent) registerInterface(ifaceName string, ifIndex int) (uint16, error) {
+	if idx, exists := ma.vifMap[ifaceName]; exists {
+		return idx, nil
+	}
+
+	var vifIdx int = -1
+	if ifaceName == ma.upstreamName {
+		vifIdx = 0
+	} else {
+		for i := 1; i < 32; i++ {
+			if !ma.vifUsed[i] {
+				vifIdx = i
+				break
+			}
+		}
+	}
+
+	if vifIdx == -1 {
+		return 0, fmt.Errorf("no available VIF index for interface %s", ifaceName)
+	}
+
+	// Configure sysctl to disable reverse path filtering on the new interface
+	_ = os.WriteFile(fmt.Sprintf("/proc/sys/net/ipv4/conf/%s/rp_filter", ifaceName), []byte("0"), 0644)
+
+	// Register with IPv4
+	if ma.mcastSocket4 != 0 {
+		vif := vifctl{
+			vifc_vifi:        uint16(vifIdx),
+			vifc_flags:       VIFF_USE_IFINDEX,
+			vifc_threshold:   1,
+			vifc_rate_limit:  0,
+			vifc_lcl_ifindex: int32(ifIndex),
+		}
+		ptr := unsafe.Pointer(&vif)
+		size := unsafe.Sizeof(vif)
+		buf := unsafe.Slice((*byte)(ptr), size)
+		err := unix.SetsockoptString(ma.mcastSocket4, unix.IPPROTO_IP, MRT_ADD_VIF, string(buf))
+		if err != nil {
+			klog.Errorf("failed to add IPv4 VIF for %s (vifi %d): %v", ifaceName, vifIdx, err)
+		} else {
+			klog.Infof("Successfully added IPv4 VIF for %s (vifi %d)", ifaceName, vifIdx)
+		}
+	}
+
+	// Register with IPv6
+	if ma.mcastSocket6 != 0 {
+		mif := mif6ctl{
+			mif6c_mifi:      uint16(vifIdx),
+			mif6c_flags:     0,
+			vifc_threshold:  1,
+			mif6c_pifi:      uint16(ifIndex),
+			vifc_rate_limit: 0,
+		}
+		ptr := unsafe.Pointer(&mif)
+		size := unsafe.Sizeof(mif)
+		buf := unsafe.Slice((*byte)(ptr), size)
+		err := unix.SetsockoptString(ma.mcastSocket6, unix.IPPROTO_IPV6, MRT6_ADD_MIF, string(buf))
+		if err != nil {
+			klog.Errorf("failed to add IPv6 MIF for %s (mifi %d): %v", ifaceName, vifIdx, err)
+		} else {
+			klog.Infof("Successfully added IPv6 MIF for %s (mifi %d)", ifaceName, vifIdx)
+		}
+	}
+
+	ma.vifMap[ifaceName] = uint16(vifIdx)
+	ma.vifUsed[vifIdx] = true
+	return uint16(vifIdx), nil
+}
+
+func (ma *MulticastAgent) unregisterInterface(ifaceName string) {
+	vifIdx, exists := ma.vifMap[ifaceName]
+	if !exists {
+		return
+	}
+
+	// Unregister with IPv4
+	if ma.mcastSocket4 != 0 {
+		vif := vifctl{
+			vifc_vifi: vifIdx,
+		}
+		ptr := unsafe.Pointer(&vif)
+		size := unsafe.Sizeof(vif)
+		buf := unsafe.Slice((*byte)(ptr), size)
+		_ = unix.SetsockoptString(ma.mcastSocket4, unix.IPPROTO_IP, MRT_DEL_VIF, string(buf))
+	}
+
+	// Unregister with IPv6
+	if ma.mcastSocket6 != 0 {
+		mif := mif6ctl{
+			mif6c_mifi: vifIdx,
+		}
+		ptr := unsafe.Pointer(&mif)
+		size := unsafe.Sizeof(mif)
+		buf := unsafe.Slice((*byte)(ptr), size)
+		_ = unix.SetsockoptString(ma.mcastSocket6, unix.IPPROTO_IPV6, MRT6_DEL_MIF, string(buf))
+	}
+
+	delete(ma.vifMap, ifaceName)
+	ma.vifUsed[vifIdx] = false
+	klog.Infof("Successfully removed VIF/MIF for %s (index %d)", ifaceName, vifIdx)
+}
+
+func (ma *MulticastAgent) addMfc(src, grp net.IP, parentVif uint16, outgoingVifs []uint16) error {
+	if ma.mcastSocket4 == 0 {
+		return fmt.Errorf("IPv4 multicast socket not initialized")
+	}
+
+	var mfc mfcctl
+	copy(mfc.mfcc_origin[:], src.To4())
+	copy(mfc.mfcc_mcastgrp[:], grp.To4())
+	mfc.mfcc_parent = parentVif
+
+	for i := range mfc.mfcc_ttls {
+		mfc.mfcc_ttls[i] = 0
+	}
+	for _, vif := range outgoingVifs {
+		if vif < 32 {
+			mfc.mfcc_ttls[vif] = 1
+		}
+	}
+
+	ptr := unsafe.Pointer(&mfc)
+	size := unsafe.Sizeof(mfc)
+	buf := unsafe.Slice((*byte)(ptr), size)
+
+	err := unix.SetsockoptString(ma.mcastSocket4, unix.IPPROTO_IP, MRT_ADD_MFC, string(buf))
+	if err != nil {
+		return fmt.Errorf("failed to add IPv4 MFC entry: %w", err)
+	}
+	klog.V(2).Infof("Successfully added IPv4 MFC entry for (%s, %s) parent VIF %d", src, grp, parentVif)
+	return nil
+}
+
+func (ma *MulticastAgent) addMfc6(src, grp net.IP, parentMif uint16, outgoingMifs []uint16) error {
+	if ma.mcastSocket6 == 0 {
+		return fmt.Errorf("IPv6 multicast socket not initialized")
+	}
+
+	var mfc mf6cctl
+	mfc.mf6cc_origin.sin6_family = unix.AF_INET6
+	copy(mfc.mf6cc_origin.sin6_addr[:], src.To16())
+	mfc.mf6cc_mcastgrp.sin6_family = unix.AF_INET6
+	copy(mfc.mf6cc_mcastgrp.sin6_addr[:], grp.To16())
+	mfc.mf6cc_parent = parentMif
+
+	for _, mif := range outgoingMifs {
+		if mif < 256 {
+			word := mif / 32
+			bit := mif % 32
+			mfc.mf6cc_ifset[word] |= (1 << bit)
+		}
+	}
+
+	ptr := unsafe.Pointer(&mfc)
+	size := unsafe.Sizeof(mfc)
+	buf := unsafe.Slice((*byte)(ptr), size)
+
+	err := unix.SetsockoptString(ma.mcastSocket6, unix.IPPROTO_IPV6, MRT6_ADD_MFC, string(buf))
+	if err != nil {
+		return fmt.Errorf("failed to add IPv6 MFC entry: %w", err)
+	}
+	klog.V(2).Infof("Successfully added IPv6 MFC entry for (%s, %s) parent MIF %d", src, grp, parentMif)
+	return nil
+}
+
+func (ma *MulticastAgent) deleteMfc(src, grp net.IP) error {
+	if ma.mcastSocket4 == 0 {
+		return nil
+	}
+	var mfc mfcctl
+	copy(mfc.mfcc_origin[:], src.To4())
+	copy(mfc.mfcc_mcastgrp[:], grp.To4())
+
+	ptr := unsafe.Pointer(&mfc)
+	size := unsafe.Sizeof(mfc)
+	buf := unsafe.Slice((*byte)(ptr), size)
+
+	_ = unix.SetsockoptString(ma.mcastSocket4, unix.IPPROTO_IP, MRT_DEL_MFC, string(buf))
+	return nil
+}
+
+func (ma *MulticastAgent) deleteMfc6(src, grp net.IP) error {
+	if ma.mcastSocket6 == 0 {
+		return nil
+	}
+	var mfc mf6cctl
+	mfc.mf6cc_origin.sin6_family = unix.AF_INET6
+	copy(mfc.mf6cc_origin.sin6_addr[:], src.To16())
+	mfc.mf6cc_mcastgrp.sin6_family = unix.AF_INET6
+	copy(mfc.mf6cc_mcastgrp.sin6_addr[:], grp.To16())
+
+	ptr := unsafe.Pointer(&mfc)
+	size := unsafe.Sizeof(mfc)
+	buf := unsafe.Slice((*byte)(ptr), size)
+
+	_ = unix.SetsockoptString(ma.mcastSocket6, unix.IPPROTO_IPV6, MRT6_DEL_MFC, string(buf))
+	return nil
+}
+
+func (ma *MulticastAgent) handleNoCacheIPv4(src, grp net.IP, parentVif uint16) {
+	groupStr := grp.String()
+	ma.RLock()
+	ifaces, exists := ma.groupToIfaces[groupStr]
+	if !exists || len(ifaces) == 0 {
+		ma.RUnlock()
+		return
+	}
+
+	outgoingVifs := make([]uint16, 0, len(ifaces))
+	for ifaceName := range ifaces {
+		if vif, registered := ma.vifMap[ifaceName]; registered {
+			outgoingVifs = append(outgoingVifs, vif)
+		}
+	}
+	ma.RUnlock()
+
+	if len(outgoingVifs) > 0 {
+		_ = ma.addMfc(src, grp, parentVif, outgoingVifs)
+	}
+}
+
+func (ma *MulticastAgent) handleNoCacheIPv6(src, grp net.IP, parentMif uint16) {
+	groupStr := grp.String()
+	ma.RLock()
+	ifaces, exists := ma.groupToIfaces[groupStr]
+	if !exists || len(ifaces) == 0 {
+		ma.RUnlock()
+		return
+	}
+
+	outgoingMifs := make([]uint16, 0, len(ifaces))
+	for ifaceName := range ifaces {
+		if mif, registered := ma.vifMap[ifaceName]; registered {
+			outgoingMifs = append(outgoingMifs, mif)
+		}
+	}
+	ma.RUnlock()
+
+	if len(outgoingMifs) > 0 {
+		_ = ma.addMfc6(src, grp, parentMif, outgoingMifs)
+	}
 }
 
 func (ma *MulticastAgent) Run(ctx context.Context) error {
 	klog.Info("Starting Multicast Agent")
+
+	// Initialize multicast routing sockets
+	if err := ma.initSockets(); err != nil {
+		return fmt.Errorf("failed to initialize multicast routing sockets: %w", err)
+	}
+	defer ma.cleanupSockets()
 
 	// Find default upstream interface
 	upstream, err := getUpstreamInterface()
 	if err != nil {
 		klog.Warningf("Could not find upstream interface: %v. Retrying in background...", err)
 	} else {
+		ma.Lock()
 		ma.upstreamIfIndex = upstream.Index
 		ma.upstreamName = upstream.Name
+		ma.Unlock()
 		klog.Infof("Using upstream interface: %s (index %d)", upstream.Name, upstream.Index)
+		_, _ = ma.registerInterface(upstream.Name, upstream.Index)
 	}
 
 	// Set up netlink subscriber to monitor interface changes
@@ -89,15 +403,87 @@ func (ma *MulticastAgent) Run(ctx context.Context) error {
 				ma.Lock()
 				if ma.upstreamIfIndex != up.Index {
 					klog.Infof("Upstream interface changed from %s to %s", ma.upstreamName, up.Name)
+					ma.unregisterInterface(ma.upstreamName)
 					ma.upstreamIfIndex = up.Index
 					ma.upstreamName = up.Name
+					_, _ = ma.registerInterface(up.Name, up.Index)
 				}
 				ma.Unlock()
 			}
 		}
 	}()
 
-	// Open the raw packet socket for capturing all packet traffic
+	// Read IPv4 upcalls
+	go func() {
+		if ma.mcastSocket4 == 0 {
+			return
+		}
+		buf := make([]byte, 1024)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			n, err := syscall.Read(ma.mcastSocket4, buf)
+			if err != nil {
+				if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) {
+					time.Sleep(10 * time.Millisecond)
+					continue
+				}
+				klog.Errorf("Error reading from IPv4 multicast socket: %v", err)
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			if n >= 20 {
+				var msg igmpmsg
+				ptr := unsafe.Pointer(&buf[0])
+				msg = *(*igmpmsg)(ptr)
+				if msg.im_msgtype == 1 { // IGMPMSG_NOCACHE
+					src := net.IP(msg.im_src[:])
+					grp := net.IP(msg.im_dst[:])
+					ma.handleNoCacheIPv4(src, grp, uint16(msg.im_vif))
+				}
+			}
+		}
+	}()
+
+	// Read IPv6 upcalls
+	go func() {
+		if ma.mcastSocket6 == 0 {
+			return
+		}
+		buf := make([]byte, 1024)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
+			n, err := syscall.Read(ma.mcastSocket6, buf)
+			if err != nil {
+				if errors.Is(err, syscall.EAGAIN) || errors.Is(err, syscall.EWOULDBLOCK) {
+					time.Sleep(10 * time.Millisecond)
+					continue
+				}
+				klog.Errorf("Error reading from IPv6 multicast socket: %v", err)
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			if n >= 40 {
+				var msg mrt6msg
+				ptr := unsafe.Pointer(&buf[0])
+				msg = *(*mrt6msg)(ptr)
+				if msg.im6_msgtype == 1 { // MRT6MSG_NOCACHE
+					src := net.IP(msg.im6_src[:])
+					grp := net.IP(msg.im6_dst[:])
+					ma.handleNoCacheIPv6(src, grp, msg.im6_mif)
+				}
+			}
+		}
+	}()
+
+	// Open the raw packet socket for capturing Pod IGMP/MLD reports
 	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW, int(htons(unix.ETH_P_ALL)))
 	if err != nil {
 		return fmt.Errorf("failed to open raw packet socket: %w", err)
@@ -174,134 +560,6 @@ func (ma *MulticastAgent) handlePacket(packet []byte, sll *syscall.SockaddrLinkl
 				ma.parseAndHandleMLD(payload, iface.Name)
 			}
 		}
-		return
-	}
-
-	// Process Multicast Data from Upstream Interface
-	ma.RLock()
-	isUpstream := sll.Ifindex == ma.upstreamIfIndex
-	ma.RUnlock()
-
-	if isUpstream {
-		var dstIP net.IP
-		var groupStr string
-
-		if etherType == unix.ETH_P_IP && len(ipPayload) >= 20 {
-			dstIP = net.IP(ipPayload[16:20])
-			if dstIP.IsMulticast() && !isLinkLocalMulticastIPv4(dstIP) {
-				groupStr = dstIP.String()
-			}
-		} else if etherType == unix.ETH_P_IPV6 && len(ipPayload) >= 40 {
-			dstIP = net.IP(ipPayload[24:40])
-			if dstIP.IsMulticast() && !isLinkLocalMulticastIPv6(dstIP) {
-				groupStr = dstIP.String()
-			}
-		}
-
-		if groupStr != "" {
-			ma.RLock()
-			ifaces, exists := ma.groupToIfaces[groupStr]
-			if exists && len(ifaces) > 0 {
-				// Forward this packet to all interested pod interfaces
-				for ifaceName := range ifaces {
-					targetIface, err := net.InterfaceByName(ifaceName)
-					if err == nil {
-						ma.forwardRawPacket(packet, targetIface.Index, etherType)
-					}
-				}
-			}
-			ma.RUnlock()
-		}
-	}
-}
-
-func (ma *MulticastAgent) parseAndHandleIGMP(igmpData []byte, ifaceName string) {
-	if len(igmpData) < 8 {
-		return
-	}
-	igmpType := igmpData[0]
-	groupIP := net.IP(igmpData[4:8])
-
-	switch igmpType {
-	case 0x16: // IGMPv2 Membership Report
-		ma.joinGroup(groupIP, ifaceName)
-	case 0x17: // IGMPv2 Leave Group
-		ma.leaveGroup(groupIP, ifaceName)
-	case 0x22: // IGMPv3 Membership Report
-		// Parse group records
-		if len(igmpData) >= 8 {
-			numRecords := binary.BigEndian.Uint16(igmpData[6:8])
-			offset := 8
-			for i := 0; i < int(numRecords); i++ {
-				if len(igmpData) < offset+8 {
-					break
-				}
-				recordType := igmpData[offset]
-				numSources := binary.BigEndian.Uint16(igmpData[offset+2 : offset+4])
-				mcastAddr := net.IP(igmpData[offset+4 : offset+8])
-
-				// Record types: 1 = MODE_IS_INCLUDE, 2 = MODE_IS_EXCLUDE, 3 = CHANGE_TO_INCLUDE_MODE, 4 = CHANGE_TO_EXCLUDE_MODE, 5 = ALLOW_NEW_SOURCES, 6 = BLOCK_OLD_SOURCES
-				switch recordType {
-				case 1, 2, 3, 4, 5:
-					if recordType == 1 && numSources == 0 {
-						// INCLUDE with 0 sources is equivalent to leaving the group
-						ma.leaveGroup(mcastAddr, ifaceName)
-					} else {
-						ma.joinGroup(mcastAddr, ifaceName)
-					}
-				case 6:
-					ma.leaveGroup(mcastAddr, ifaceName)
-				}
-				offset += 8 + int(numSources)*4
-			}
-		}
-	}
-}
-
-func (ma *MulticastAgent) parseAndHandleMLD(icmpv6Data []byte, ifaceName string) {
-	if len(icmpv6Data) < 8 {
-		return
-	}
-	icmpType := icmpv6Data[0]
-
-	// MLDv1: 131 = Multicast Listener Report, 132 = Multicast Listener Done
-	// MLDv2: 143 = Multicast Listener Report v2
-	switch icmpType {
-	case 131:
-		if len(icmpv6Data) >= 24 {
-			groupIP := net.IP(icmpv6Data[8:24])
-			ma.joinGroup(groupIP, ifaceName)
-		}
-	case 132:
-		if len(icmpv6Data) >= 24 {
-			groupIP := net.IP(icmpv6Data[8:24])
-			ma.leaveGroup(groupIP, ifaceName)
-		}
-	case 143:
-		if len(icmpv6Data) >= 6 {
-			numRecords := binary.BigEndian.Uint16(icmpv6Data[6:8])
-			offset := 8
-			for i := 0; i < int(numRecords); i++ {
-				if len(icmpv6Data) < offset+20 {
-					break
-				}
-				recordType := icmpv6Data[offset]
-				numSources := binary.BigEndian.Uint16(icmpv6Data[offset+2 : offset+4])
-				mcastAddr := net.IP(icmpv6Data[offset+4 : offset+20])
-
-				switch recordType {
-				case 1, 2, 3, 4, 5:
-					if recordType == 1 && numSources == 0 {
-						ma.leaveGroup(mcastAddr, ifaceName)
-					} else {
-						ma.joinGroup(mcastAddr, ifaceName)
-					}
-				case 6:
-					ma.leaveGroup(mcastAddr, ifaceName)
-				}
-				offset += 20 + int(numSources)*16
-			}
-		}
 	}
 }
 
@@ -312,23 +570,37 @@ func (ma *MulticastAgent) joinGroup(groupIP net.IP, ifaceName string) {
 	ma.Lock()
 	defer ma.Unlock()
 
+	ifi, err := net.InterfaceByName(ifaceName)
+	if err != nil {
+		klog.Warningf("Warning: interface %s not found on system: %v", ifaceName, err)
+	} else {
+		_, err = ma.registerInterface(ifaceName, ifi.Index)
+		if err != nil {
+			klog.Errorf("Error registering interface %s: %v", ifaceName, err)
+		}
+	}
+
 	if _, exists := ma.groupToIfaces[groupStr]; !exists {
 		ma.groupToIfaces[groupStr] = make(map[string]bool)
 	}
 	ma.groupToIfaces[groupStr][ifaceName] = true
 
-	// Join group on upstream interface if not already done
+	if ma.upstreamIfIndex != 0 && ma.upstreamName != "" {
+		_, _ = ma.registerInterface(ma.upstreamName, ma.upstreamIfIndex)
+	}
+
+	// Join group on upstream interface
 	if _, active := ma.activeJoins[groupStr]; !active && ma.upstreamIfIndex != 0 {
-		ifi, err := net.InterfaceByIndex(ma.upstreamIfIndex)
+		ifiUp, err := net.InterfaceByIndex(ma.upstreamIfIndex)
 		if err == nil {
 			if groupIP.To4() != nil {
 				c, err := net.ListenPacket("udp4", "0.0.0.0:0")
 				if err == nil {
 					p := ipv4.NewPacketConn(c)
-					err = p.JoinGroup(ifi, &net.UDPAddr{IP: groupIP})
+					err = p.JoinGroup(ifiUp, &net.UDPAddr{IP: groupIP})
 					if err == nil {
 						ma.activeJoins[groupStr] = c
-						klog.Infof("Successfully joined IPv4 group %s on upstream %s", groupStr, ifi.Name)
+						klog.Infof("Successfully joined IPv4 group %s on upstream %s", groupStr, ifiUp.Name)
 					} else {
 						_ = c.Close()
 						klog.Errorf("Error joining IPv4 group %s on upstream: %v", groupStr, err)
@@ -338,10 +610,10 @@ func (ma *MulticastAgent) joinGroup(groupIP net.IP, ifaceName string) {
 				c, err := net.ListenPacket("udp6", "[::]:0")
 				if err == nil {
 					p := ipv6.NewPacketConn(c)
-					err = p.JoinGroup(ifi, &net.UDPAddr{IP: groupIP})
+					err = p.JoinGroup(ifiUp, &net.UDPAddr{IP: groupIP})
 					if err == nil {
 						ma.activeJoins[groupStr] = c
-						klog.Infof("Successfully joined IPv6 group %s on upstream %s", groupStr, ifi.Name)
+						klog.Infof("Successfully joined IPv6 group %s on upstream %s", groupStr, ifiUp.Name)
 					} else {
 						_ = c.Close()
 						klog.Errorf("Error joining IPv6 group %s on upstream: %v", groupStr, err)
@@ -363,7 +635,6 @@ func (ma *MulticastAgent) leaveGroup(groupIP net.IP, ifaceName string) {
 		delete(ifaces, ifaceName)
 		if len(ifaces) == 0 {
 			delete(ma.groupToIfaces, groupStr)
-			// Leave group on upstream interface
 			if c, active := ma.activeJoins[groupStr]; active {
 				if conn, ok := c.(net.PacketConn); ok {
 					_ = conn.Close()
@@ -373,36 +644,21 @@ func (ma *MulticastAgent) leaveGroup(groupIP net.IP, ifaceName string) {
 			}
 		}
 	}
-}
 
-func (ma *MulticastAgent) forwardRawPacket(packet []byte, targetIfIndex int, etherType uint16) {
-	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW, int(htons(etherType)))
-	if err != nil {
-		return
+	inUse := false
+	for _, ifaces := range ma.groupToIfaces {
+		if ifaces[ifaceName] {
+			inUse = true
+			break
+		}
 	}
-	defer func() {
-		_ = syscall.Close(fd)
-	}()
-
-	broadcastMAC := []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
-	addr := &syscall.SockaddrLinklayer{
-		Protocol: htons(etherType),
-		Ifindex:  targetIfIndex,
-		Hatype:   syscall.ARPHRD_ETHER,
-		Pkttype:  syscall.PACKET_OUTGOING,
-		Halen:    6,
+	if !inUse {
+		ma.unregisterInterface(ifaceName)
 	}
-	copy(addr.Addr[:6], broadcastMAC)
-
-	// Rewrite Ethernet header destination to broadcast
-	copy(packet[0:6], broadcastMAC)
-
-	_ = syscall.Sendto(fd, packet, 0, addr)
 }
 
 func CleanRules() {
-	// Independent agent doesn't install firewall rules in user space mode,
-	// so cleanup is a no-op.
+	// Independent agent doesn't install firewall rules, so cleanup is a no-op.
 }
 
 func getUpstreamInterface() (*net.Interface, error) {
@@ -423,12 +679,4 @@ func getUpstreamInterface() (*net.Interface, error) {
 
 func htons(i uint16) uint16 {
 	return (i << 8) | (i >> 8)
-}
-
-func isLinkLocalMulticastIPv4(ip net.IP) bool {
-	return ip[0] == 224 && ip[1] == 0 && ip[2] == 0
-}
-
-func isLinkLocalMulticastIPv6(ip net.IP) bool {
-	return ip[0] == 0xff && (ip[1]&0x0f) <= 0x02
 }
