@@ -21,6 +21,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"strings"
@@ -662,18 +663,72 @@ func CleanRules() {
 }
 
 func getUpstreamInterface() (*net.Interface, error) {
-	routes, err := netlink.RouteList(nil, netlink.FAMILY_ALL)
+	filter := &netlink.Route{
+		Table: unix.RT_TABLE_MAIN,
+	}
+	routes, err := netlink.RouteListFiltered(netlink.FAMILY_ALL, filter, netlink.RT_FILTER_TABLE)
 	if err != nil {
 		return nil, err
 	}
+
+	minMetricV4 := math.MaxInt32
+	minMetricV6 := math.MaxInt32
+
+	var bestIfaceV4 *net.Interface
+	var bestIfaceV6 *net.Interface
+
 	for _, r := range routes {
-		if r.Dst == nil || r.Dst.IP.Equal(net.IPv4zero) || r.Dst.IP.Equal(net.IPv6zero) {
-			ifi, err := net.InterfaceByIndex(r.LinkIndex)
-			if err == nil {
-				return ifi, nil
+		if r.Family != netlink.FAMILY_V4 && r.Family != netlink.FAMILY_V6 {
+			continue
+		}
+
+		// Identify default route: Dst is nil, or Dst is 0.0.0.0/0 or ::/0
+		if r.Dst != nil {
+			ones, bits := r.Dst.Mask.Size()
+			if !r.Dst.IP.IsUnspecified() || ones != 0 || (bits != 32 && bits != 128) {
+				continue
+			}
+		}
+
+		metric := r.Priority
+
+		// Gather link indices
+		var linkIndices []int
+		if len(r.MultiPath) > 0 {
+			for _, nh := range r.MultiPath {
+				linkIndices = append(linkIndices, nh.LinkIndex)
+			}
+		} else {
+			linkIndices = append(linkIndices, r.LinkIndex)
+		}
+
+		for _, linkIndex := range linkIndices {
+			ifi, err := net.InterfaceByIndex(linkIndex)
+			if err != nil {
+				continue
+			}
+
+			if r.Family == netlink.FAMILY_V4 {
+				if int(metric) < minMetricV4 {
+					minMetricV4 = int(metric)
+					bestIfaceV4 = ifi
+				}
+			} else {
+				if int(metric) < minMetricV6 {
+					minMetricV6 = int(metric)
+					bestIfaceV6 = ifi
+				}
 			}
 		}
 	}
+
+	if bestIfaceV4 != nil {
+		return bestIfaceV4, nil
+	}
+	if bestIfaceV6 != nil {
+		return bestIfaceV6, nil
+	}
+
 	return nil, fmt.Errorf("default gateway interface not found")
 }
 
