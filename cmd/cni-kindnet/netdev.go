@@ -19,6 +19,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"runtime"
@@ -376,20 +377,70 @@ func deletePodInterface(ifName string, netNS string) error {
 }
 
 func getDefaultGwInterfaceMTU() int {
-	routes, err := netlink.RouteList(nil, netlink.FAMILY_ALL)
+	filter := &netlink.Route{
+		Table: unix.RT_TABLE_MAIN,
+	}
+	routes, err := netlink.RouteListFiltered(netlink.FAMILY_ALL, filter, netlink.RT_FILTER_TABLE)
 	if err != nil && !errors.Is(err, unix.EINTR) {
 		return 0
 	}
 
+	minMetricV4 := math.MaxInt32
+	minMetricV6 := math.MaxInt32
+
+	var bestLinkV4 int
+	var bestLinkV6 int
+	hasV4 := false
+	hasV6 := false
+
 	for _, r := range routes {
-		if r.Dst.IP.Equal(net.IPv4zero) || r.Dst.IP.Equal(net.IPv6zero) {
-			intfLink, err := netlink.LinkByIndex(r.LinkIndex)
-			if err != nil {
-				logger.Printf("Failed to get interface link for route %v : %v", r, err)
+		if r.Family != netlink.FAMILY_V4 && r.Family != netlink.FAMILY_V6 {
+			continue
+		}
+
+		if r.Dst != nil {
+			ones, bits := r.Dst.Mask.Size()
+			if !r.Dst.IP.IsUnspecified() || ones != 0 || (bits != 32 && bits != 128) {
 				continue
 			}
-			return intfLink.Attrs().MTU
+		}
+
+		metric := r.Priority
+
+		var linkIndex int
+		if len(r.MultiPath) > 0 {
+			linkIndex = r.MultiPath[0].LinkIndex
+		} else {
+			linkIndex = r.LinkIndex
+		}
+
+		if r.Family == netlink.FAMILY_V4 {
+			if metric < minMetricV4 {
+				minMetricV4 = metric
+				bestLinkV4 = linkIndex
+				hasV4 = true
+			}
+		} else {
+			if metric < minMetricV6 {
+				minMetricV6 = metric
+				bestLinkV6 = linkIndex
+				hasV6 = true
+			}
 		}
 	}
-	return 0
+
+	var bestLink int
+	if hasV4 {
+		bestLink = bestLinkV4
+	} else if hasV6 {
+		bestLink = bestLinkV6
+	} else {
+		return 0
+	}
+
+	intfLink, err := netlink.LinkByIndex(bestLink)
+	if err != nil {
+		return 0
+	}
+	return intfLink.Attrs().MTU
 }
