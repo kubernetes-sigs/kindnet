@@ -23,7 +23,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/sets"
 	internalapi "k8s.io/cri-api/pkg/apis"
 	remote "k8s.io/cri-client/pkg"
-	"k8s.io/klog/v2"
 )
 
 const (
@@ -37,10 +36,9 @@ var (
 )
 
 func getRuntimeService(timeout time.Duration) (res internalapi.RuntimeService, err error) {
-	logger := klog.Background()
 	if RuntimeEndpoint == "" {
 		for _, endPoint := range defaultRuntimeEndpoints {
-			res, err = remote.NewRemoteRuntimeService(endPoint, timeout, nil, &logger)
+			res, err = remote.NewRemoteRuntimeService(context.Background(), endPoint, timeout, nil, false)
 			if err != nil {
 				continue
 			}
@@ -49,7 +47,7 @@ func getRuntimeService(timeout time.Duration) (res internalapi.RuntimeService, e
 		}
 		return res, err
 	}
-	return remote.NewRemoteRuntimeService(RuntimeEndpoint, timeout, nil, &logger)
+	return remote.NewRemoteRuntimeService(context.Background(), RuntimeEndpoint, timeout, nil, false)
 }
 
 func getPodsIPs() (map[string][]string, error) {

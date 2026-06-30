@@ -43,6 +43,7 @@ import (
 	"sigs.k8s.io/kube-network-policies/pkg/dataplane"
 	"sigs.k8s.io/kube-network-policies/pkg/networkpolicy"
 	"sigs.k8s.io/kube-network-policies/pkg/podinfo"
+	"sigs.k8s.io/kube-network-policies/pkg/podinfo/nri"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/sys/unix"
@@ -375,7 +376,7 @@ func main() {
 		// the Pod and IP information is provided at the time the Pod Sandbox is created and before
 		// the containers start running, so policies can be enforced without race conditions.
 		if !disableNRI {
-			nriIPResolver, err := podinfo.NewNRIResolver(ctx, nodeName, nil)
+			nriIPResolver, err := nri.NewNRIResolver(ctx, nodeName, nil)
 			if err != nil {
 				klog.Infof("failed to create NRI plugin, using apiserver information only: %v", err)
 			}
