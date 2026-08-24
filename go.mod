@@ -9,7 +9,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.322.0
 	github.com/containerd/nri v0.12.2
 	github.com/florianl/go-nflog/v2 v2.3.0
-	github.com/florianl/go-nfqueue v1.3.2
+	github.com/florianl/go-nfqueue/v2 v2.1.0
 	github.com/google/go-cmp v0.7.0
 	github.com/google/nftables v0.3.0
 	github.com/mdlayher/netlink v1.11.2
@@ -47,7 +47,6 @@ require (
 	github.com/containerd/log v0.1.0 // indirect
 	github.com/containerd/ttrpc v1.2.7 // indirect
 	github.com/emicklei/go-restful/v3 v3.13.0 // indirect
-	github.com/florianl/go-nfqueue/v2 v2.1.0 // indirect
 	github.com/fxamacker/cbor/v2 v2.9.0 // indirect
 	github.com/go-logr/stdr v1.2.2 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect
