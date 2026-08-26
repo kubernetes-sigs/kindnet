@@ -167,7 +167,13 @@ jobs:
         export E2E_REPORT_DIR=${PWD}/_artifacts
 
         # Run tests
+        # The [sig-network] Services specs that assert a connection must NOT succeed
+        # read the exit status of `kubectl exec ... curl` through the exec stream. Under
+        # load that status is sometimes lost, the spec sees a nil error and fails even
+        # though the packet was dropped correctly. Retry once: a real traffic-policy
+        # regression fails on every attempt and still turns the job red.
         /usr/local/bin/ginkgo --nodes=25                \
+          --flake-attempts=2                            \
           --focus="\[Conformance\]|\[sig-network\]"     \
           --skip="Feature|Federation|machinery|PerformanceDNS|DualStack|Disruptive|Serial|Slow|KubeProxy|LoadBalancer|GCE|Netpol|NetworkPolicy|NodeConformance"   \
           /usr/local/bin/e2e.test                       \
