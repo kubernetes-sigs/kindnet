@@ -38,7 +38,11 @@ var (
 func getRuntimeService(timeout time.Duration) (res internalapi.RuntimeService, err error) {
 	if RuntimeEndpoint == "" {
 		for _, endPoint := range defaultRuntimeEndpoints {
-			res, err = remote.NewRemoteRuntimeService(context.Background(), endPoint, timeout, nil, false)
+			res, err = remote.NewRemoteRuntimeServiceBuilder().
+				WithEndpoint(endPoint).
+				WithConnectionTimeout(timeout).
+				WithTracerProvider(nil).
+				Build(context.Background())
 			if err != nil {
 				continue
 			}
@@ -47,7 +51,11 @@ func getRuntimeService(timeout time.Duration) (res internalapi.RuntimeService, e
 		}
 		return res, err
 	}
-	return remote.NewRemoteRuntimeService(context.Background(), RuntimeEndpoint, timeout, nil, false)
+	return remote.NewRemoteRuntimeServiceBuilder().
+		WithEndpoint(RuntimeEndpoint).
+		WithConnectionTimeout(timeout).
+		WithTracerProvider(nil).
+		Build(context.Background())
 }
 
 func getPodsIPs() (map[string][]string, error) {
