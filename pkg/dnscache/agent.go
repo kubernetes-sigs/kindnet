@@ -27,7 +27,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/florianl/go-nfqueue"
+	"github.com/florianl/go-nfqueue/v2"
 	"github.com/google/nftables"
 	"github.com/google/nftables/binaryutil"
 	"github.com/google/nftables/expr"
@@ -262,7 +262,6 @@ func printNfnetlinkQueueStats() {
 		}
 		klog.Infof("nfqueue stats: queue_number: %s port_id: %s queue_total: %s copy_mode: %s copy_range: %s kernel_dropped: %s user_dropped: %s last_packet_id: %s", fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6], fields[7])
 	}
-
 }
 
 // SyncRules syncs ip masquerade rules
