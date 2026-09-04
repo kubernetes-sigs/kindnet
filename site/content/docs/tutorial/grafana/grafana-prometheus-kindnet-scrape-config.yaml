@@ -1,0 +1,19 @@
+# Helm values for kube-prometheus-stack chart
+# Configures Prometheus to scrape kindnet metrics via the kindnet-metrics service
+
+prometheus:
+  prometheusSpec:
+    additionalScrapeConfigs:
+      - job_name: kindnet
+        metrics_path: /metrics
+        kubernetes_sd_configs:
+          - role: endpoints
+            namespaces:
+              names:
+                - kube-system
+        relabelings:
+          - source_labels: [__meta_kubernetes_service_name]
+            action: keep
+            regex: kindnet-metrics
+          - target_label: __address__
+            replacement: kindnet-metrics.kube-system.svc:19080
