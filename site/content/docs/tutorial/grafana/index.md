@@ -10,6 +10,7 @@ In this tutorial, we will guide you through the process of setting up a Grafana 
 Before you begin, ensure you have the following tools installed on your local machine:
 - **Docker Desktop**: Required to run Kubernetes clusters locally.
 - **kind**: A tool for running local Kubernetes clusters using Docker container nodes. You can install it by following the instructions on the [kind website](https://kind.sigs.k8s.io).
+- **Helm**: A package manager for Kubernetes. You can install it by following the instructions on the [Helm website](https://helm.sh/docs/intro/install/).
 
 ## Steps
 
@@ -35,10 +36,16 @@ kubectl label configmap kindnet-dashboards grafana_dashboard=1 -n monitoring
 
 **4. Install and configure `Grafana` and `Prometheus`**
 
+First, add the required Helm repositories:
+
 ```bash
 helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
-helm repo add grafana https://grafana.github.io/helm-charts
 helm repo update
+```
+
+Then install the `kube-prometheus-stack` chart using the [scrape configuration](grafana-prometheus-kindnet-scrape-config.yaml) that tells Prometheus to collect metrics from the `kindnet-metrics` service:
+
+```bash
 helm install monitoring prometheus-community/kube-prometheus-stack --namespace monitoring --values grafana-prometheus-kindnet-scrape-config.yaml
 ```
 
