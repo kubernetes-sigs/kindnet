@@ -89,6 +89,8 @@ type DNSCacheAgent struct {
 	nameServers []string
 
 	nfq *nfqueue.Nfqueue
+	// flushed is set once this process has recreated the table from scratch.
+	flushed bool
 
 	cache   *ipCache
 	tcpPool *Pools
@@ -271,15 +273,25 @@ func (d *DNSCacheAgent) SyncRules(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("can not start nftables:%v", err)
 	}
-	// add + delete + add for flushing all the table
+	// Atomic rule replacement: add the table, flush its rules and load the new
+	// ones in a single transaction. The table and its base chains are kept,
+	// deleting a base chain unregisters its netfilter hook and the kernel drops
+	// every packet waiting in any nfqueue of the network namespace.
+	// https://wiki.nftables.org/wiki-nftables/index.php/Atomic_rule_replacement
 	table := &nftables.Table{
 		Name:   tableName,
 		Family: nftables.TableFamilyINet,
 	}
+	nft.AddTable(table)
+	nft.FlushTable(table)
 
-	nft.AddTable(table)
-	nft.DelTable(table)
-	nft.AddTable(table)
+	// Recreate the table on the first sync of this process to remove anything
+	// left by a previous version, such as a base chain with a different priority
+	// that can not be updated in place.
+	if !d.flushed {
+		nft.DelTable(table)
+		nft.AddTable(table)
+	}
 
 	chain := nft.AddChain(&nftables.Chain{
 		Name:     "prerouting",
@@ -310,6 +322,11 @@ func (d *DNSCacheAgent) SyncRules(ctx context.Context) error {
 				Key: addr.AsSlice(),
 			})
 		}
+		// flush table does not touch the sets, recreate it to replace its elements
+		if err := nft.AddSet(v4Set, nil); err != nil {
+			return fmt.Errorf("failed to add Set %s : %v", v4Set.Name, err)
+		}
+		nft.DelSet(v4Set)
 		if err := nft.AddSet(v4Set, elementsV4); err != nil {
 			return fmt.Errorf("failed to add Set %s : %v", v4Set.Name, err)
 		}
@@ -359,10 +376,10 @@ func (d *DNSCacheAgent) SyncRules(ctx context.Context) error {
 				Key: addr.AsSlice(),
 			})
 		}
-		if err := nft.AddSet(v6Set, elementsV6); err != nil {
+		if err := nft.AddSet(v6Set, nil); err != nil {
 			return fmt.Errorf("failed to add Set %s : %v", v6Set.Name, err)
 		}
-
+		nft.DelSet(v6Set)
 		if err := nft.AddSet(v6Set, elementsV6); err != nil {
 			return fmt.Errorf("failed to add Set %s : %v", v6Set.Name, err)
 		}
@@ -421,6 +438,7 @@ func (d *DNSCacheAgent) SyncRules(ctx context.Context) error {
 		klog.Infof("error syncing nftables rules %v", err)
 		return err
 	}
+	d.flushed = true
 	return nil
 }
 

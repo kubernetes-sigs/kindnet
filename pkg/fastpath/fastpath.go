@@ -53,6 +53,8 @@ func NewFastpathAgent(packetThresold int) (*FastPathAgent, error) {
 
 type FastPathAgent struct {
 	packetThresold uint32
+	// flushed is set once this process has recreated the table from scratch.
+	flushed bool
 }
 
 func (ma *FastPathAgent) Run(ctx context.Context) error {
@@ -134,14 +136,25 @@ func (ma *FastPathAgent) syncRules(devices []string) error {
 		return fmt.Errorf("fastpath failure, can not start nftables:%v", err)
 	}
 
-	// add + delete + add for flushing all the table
+	// Atomic rule replacement: add the table, flush its rules and load the new
+	// ones in a single transaction. The table, its base chain and its flowtable
+	// are kept, unregistering a netfilter hook makes the kernel drop every
+	// packet waiting in any nfqueue of the network namespace.
+	// https://wiki.nftables.org/wiki-nftables/index.php/Atomic_rule_replacement
 	fastpathTable := &nftables.Table{
 		Name:   tableName,
 		Family: nftables.TableFamilyINet,
 	}
 	nft.AddTable(fastpathTable)
-	nft.DelTable(fastpathTable)
-	nft.AddTable(fastpathTable)
+	nft.FlushTable(fastpathTable)
+
+	// Recreate the table on the first sync of this process to remove anything
+	// left by a previous version, such as a base chain with a different priority
+	// that can not be updated in place.
+	if !ma.flushed {
+		nft.DelTable(fastpathTable)
+		nft.AddTable(fastpathTable)
+	}
 
 	devicesSet := &nftables.Set{
 		Table:        fastpathTable,
@@ -157,10 +170,17 @@ func (ma *FastPathAgent) syncRules(devices []string) error {
 		})
 	}
 
+	// flush table does not touch the sets, recreate it to replace its elements
+	if err := nft.AddSet(devicesSet, nil); err != nil {
+		return fmt.Errorf("failed to add Set %s : %v", devicesSet.Name, err)
+	}
+	nft.DelSet(devicesSet)
 	if err := nft.AddSet(devicesSet, elements); err != nil {
 		return fmt.Errorf("failed to add Set %s : %v", devicesSet.Name, err)
 	}
 
+	// Adding an existing flowtable registers the devices it does not have yet
+	// (Linux 5.13+), the kernel removes the ones that disappear.
 	flowtable := &nftables.Flowtable{
 		Table:    fastpathTable,
 		Name:     kindnetFlowtable,
@@ -220,6 +240,7 @@ func (ma *FastPathAgent) syncRules(devices []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create kindnet-fastpath table: %v", err)
 	}
+	ma.flushed = true
 	return nil
 }
 

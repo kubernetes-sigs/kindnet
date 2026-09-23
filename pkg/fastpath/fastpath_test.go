@@ -34,11 +34,14 @@ func TestFastPathAgent_syncRules(t *testing.T) {
 	}
 
 	tests := []struct {
-		name             string
+		name string
+		// devices passed to each successive sync
+		syncs            [][]string
 		expectedNftables string
 	}{
 		{
-			name: "simple",
+			name:  "simple",
+			syncs: [][]string{nil, nil},
 			expectedNftables: `
 table inet kindnet-fastpath {
     set kindnet-set-devices {
@@ -47,6 +50,31 @@ table inet kindnet-fastpath {
 
     flowtable kindnet-flowtables {
             hook ingress priority filter + 5
+    }
+
+    chain kindnet-fastpath-chain {
+            type filter hook forward priority mangle; policy accept;
+            iifname != @kindnet-set-devices return
+            oifname != @kindnet-set-devices return
+            ct state established ct packets > 0 flow add @kindnet-flowtables counter packets 0 bytes 0
+    }
+}
+`,
+		},
+		{
+			name:  "new device",
+			syncs: [][]string{{"veth0"}, {"veth0", "veth1"}},
+			expectedNftables: `
+table inet kindnet-fastpath {
+    set kindnet-set-devices {
+            type ifname
+            elements = { "veth0",
+                         "veth1" }
+    }
+
+    flowtable kindnet-flowtables {
+            hook ingress priority filter + 5
+            devices = { "veth0", "veth1" }
     }
 
     chain kindnet-fastpath-chain {
@@ -79,8 +107,23 @@ table inet kindnet-fastpath {
 			}
 			defer newns.Close()
 
-			if err := n.syncRules(nil); err != nil {
-				t.Fatalf("FastPathAgent.SyncRules() error = %v", err)
+			if out, err := exec.Command("ip", "link", "add", "veth0", "type", "veth", "peer", "name", "veth1").CombinedOutput(); err != nil {
+				t.Fatalf("failed to create veth pair: %v: %s", err, out)
+			}
+
+			// A resync must keep the table, its base chain and its flowtable,
+			// unregistering a hook drops the packets waiting in every nfqueue
+			// of the namespace.
+			var handles []string
+			for i, devices := range tt.syncs {
+				if err := n.syncRules(devices); err != nil {
+					t.Fatalf("FastPathAgent.syncRules(%v) error = %v", devices, err)
+				}
+				if i == 0 {
+					handles = baseHandles(t)
+				} else if diff := cmp.Diff(handles, baseHandles(t)); diff != "" {
+					t.Errorf("resync recreated the table, its chains or its flowtable (-first +resync):\n%s", diff)
+				}
 			}
 
 			cmd := exec.Command("nft", "list", "table", "inet", tableName)
@@ -114,4 +157,17 @@ func compareMultilineStringsIgnoreIndentation(str1, str2 string) bool {
 	str2 = re.ReplaceAllString(str2, "")
 
 	return str1 == str2
+}
+
+var handleRE = regexp.MustCompile(`(?m)^\s*(?:table|chain|flowtable) .* # handle \d+$`)
+
+// baseHandles returns the table, chain and flowtable lines of "nft -a list table",
+// whose kernel handles change when the object is deleted and created again.
+func baseHandles(t *testing.T) []string {
+	t.Helper()
+	out, err := exec.Command("nft", "-a", "list", "table", "inet", tableName).CombinedOutput()
+	if err != nil {
+		t.Fatalf("nft -a list table error = %v, output: %s", err, string(out))
+	}
+	return handleRE.FindAllString(string(out), -1)
 }
