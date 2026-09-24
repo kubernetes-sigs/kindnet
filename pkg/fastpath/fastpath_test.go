@@ -131,9 +131,11 @@ table inet kindnet-fastpath {
 			if err != nil {
 				t.Fatalf("nft list table error = %v", err)
 			}
-			got := string(out)
-			if !compareMultilineStringsIgnoreIndentation(got, tt.expectedNftables) {
-				t.Errorf("Got:\n%s\nExpected:\n%s\nDiff:\n%s", got, tt.expectedNftables, cmp.Diff(got, tt.expectedNftables))
+			// nft versions differ on quoting the flowtable devices
+			got := strings.ReplaceAll(string(out), `"`, "")
+			want := strings.ReplaceAll(tt.expectedNftables, `"`, "")
+			if !compareMultilineStringsIgnoreIndentation(got, want) {
+				t.Errorf("Got:\n%s\nExpected:\n%s\nDiff:\n%s", got, want, cmp.Diff(got, want))
 			}
 			CleanRules()
 			cmd = exec.Command("nft", "list", "table", "inet", tableName)
