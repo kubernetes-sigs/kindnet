@@ -27,6 +27,7 @@ import (
 	"github.com/google/nftables/expr"
 	"golang.org/x/sys/unix"
 	"sigs.k8s.io/kindnet/pkg/network"
+	"sigs.k8s.io/kindnet/pkg/nft"
 
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -55,6 +56,7 @@ func NewIPMasqAgent(nodeInformer coreinformers.NodeInformer, noMasqueradeCIDRs s
 		workqueue:   workqueue.NewTypedRateLimitingQueue(workqueue.DefaultTypedControllerRateLimiter[string]()),
 		noMasqV4:    v4,
 		noMasqV6:    v6,
+		table:       nft.NewTable(tableName, nftables.TableFamilyINet),
 	}
 
 	_, err := nodeInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
@@ -115,8 +117,7 @@ type IPMasqAgent struct {
 
 	noMasqV4 []netip.Prefix
 	noMasqV6 []netip.Prefix
-	// flushed is set once this process has recreated the table from scratch.
-	flushed bool
+	table    *nft.Table
 }
 
 func (ma *IPMasqAgent) Run(ctx context.Context) error {
@@ -176,30 +177,11 @@ func (ma *IPMasqAgent) handleErr(err error, key string) {
 // SyncRules syncs ip masquerade rules
 func (ma *IPMasqAgent) SyncRules(ctx context.Context) error {
 	klog.Info("Syncing kindnet-ipmasq nftables rules")
-	nft, err := nftables.New()
+	tx, err := nftables.New()
 	if err != nil {
 		return fmt.Errorf("kindnet ipamsq failure, can not start nftables: %v", err)
 	}
-
-	// Atomic rule replacement: add the table, flush its rules and load the new
-	// ones in a single transaction. The table and its base chain are kept,
-	// deleting a base chain unregisters its netfilter hook and the kernel drops
-	// every packet waiting in any nfqueue of the network namespace.
-	// https://wiki.nftables.org/wiki-nftables/index.php/Atomic_rule_replacement
-	table := &nftables.Table{
-		Name:   tableName,
-		Family: nftables.TableFamilyINet,
-	}
-	nft.AddTable(table)
-	nft.FlushTable(table)
-
-	// Recreate the table on the first sync of this process to remove anything
-	// left by a previous version, such as a base chain with a different priority
-	// that can not be updated in place.
-	if !ma.flushed {
-		nft.DelTable(table)
-		nft.AddTable(table)
-	}
+	table := ma.table.Begin(tx)
 
 	prefixes := sets.New[netip.Prefix]()
 	prefixes.Insert(ma.noMasqV4...)
@@ -272,21 +254,14 @@ func (ma *IPMasqAgent) SyncRules(ctx context.Context) error {
 		AutoMerge: true,
 	}
 
-	// flush table does not touch the sets, recreate them to replace their elements
-	for _, set := range []struct {
-		set      *nftables.Set
-		elements []nftables.SetElement
-	}{{setV4, elementsV4}, {setV6, elementsV6}} {
-		if err := nft.AddSet(set.set, nil); err != nil {
-			return fmt.Errorf("failed to add Set %s : %v", set.set.Name, err)
-		}
-		nft.DelSet(set.set)
-		if err := nft.AddSet(set.set, set.elements); err != nil {
-			return fmt.Errorf("failed to add Set %s : %v", set.set.Name, err)
-		}
+	if err := nft.ReplaceSet(tx, setV4, elementsV4); err != nil {
+		return fmt.Errorf("failed to add Set %s : %v", setV4.Name, err)
+	}
+	if err := nft.ReplaceSet(tx, setV6, elementsV6); err != nil {
+		return fmt.Errorf("failed to add Set %s : %v", setV6.Name, err)
 	}
 
-	chain := nft.AddChain(&nftables.Chain{
+	chain := tx.AddChain(&nftables.Chain{
 		Name:     "postrouting",
 		Table:    table,
 		Type:     nftables.ChainTypeNAT,
@@ -295,7 +270,7 @@ func (ma *IPMasqAgent) SyncRules(ctx context.Context) error {
 	})
 
 	//  ct state established,related accept
-	nft.AddRule(&nftables.Rule{
+	tx.AddRule(&nftables.Rule{
 		Table: table,
 		Chain: chain,
 		Exprs: []expr.Any{
@@ -307,7 +282,7 @@ func (ma *IPMasqAgent) SyncRules(ctx context.Context) error {
 	})
 
 	// fib daddr type local accept comment "skip local traffic"
-	nft.AddRule(&nftables.Rule{
+	tx.AddRule(&nftables.Rule{
 		Table: table,
 		Chain: chain,
 		Exprs: []expr.Any{
@@ -317,7 +292,7 @@ func (ma *IPMasqAgent) SyncRules(ctx context.Context) error {
 		},
 	})
 	// ip daddr @noMasqV4 accept comment "no masquerade IPv4 traffic"
-	nft.AddRule(&nftables.Rule{
+	tx.AddRule(&nftables.Rule{
 		Table: table,
 		Chain: chain,
 		Exprs: []expr.Any{
@@ -329,7 +304,7 @@ func (ma *IPMasqAgent) SyncRules(ctx context.Context) error {
 		},
 	})
 	// ip6 daddr @noMasqV6 accept comment "no masquerade IPv6 traffic"
-	nft.AddRule(&nftables.Rule{
+	tx.AddRule(&nftables.Rule{
 		Table: table,
 		Chain: chain,
 		Exprs: []expr.Any{
@@ -342,7 +317,7 @@ func (ma *IPMasqAgent) SyncRules(ctx context.Context) error {
 	})
 
 	// masquerade comment "masquerade traffic"
-	nft.AddRule(&nftables.Rule{
+	tx.AddRule(&nftables.Rule{
 		Table: table,
 		Chain: chain,
 		Exprs: []expr.Any{
@@ -351,16 +326,15 @@ func (ma *IPMasqAgent) SyncRules(ctx context.Context) error {
 		},
 	})
 
-	err = nft.Flush()
+	err = ma.table.Commit(tx)
 	if err != nil {
 		return fmt.Errorf("failed to create kindnet-ipmasq table: %v", err)
 	}
-	ma.flushed = true
 	return nil
 }
 
 func CleanRules() {
-	nft, err := nftables.New()
+	tx, err := nftables.New()
 	if err != nil {
 		klog.Infof("ipmasq cleanup failure, can not start nftables:%v", err)
 		return
@@ -371,9 +345,9 @@ func CleanRules() {
 		Name:   tableName,
 		Family: nftables.TableFamilyINet,
 	}
-	nft.DelTable(table)
+	tx.DelTable(table)
 
-	err = nft.Flush()
+	err = tx.Flush()
 	if err != nil {
 		klog.Infof("error deleting nftables rules %v", err)
 	}

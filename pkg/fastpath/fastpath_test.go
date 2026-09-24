@@ -25,7 +25,9 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/nftables"
 	"github.com/vishvananda/netns"
+	"sigs.k8s.io/kindnet/pkg/nft"
 )
 
 func TestFastPathAgent_syncRules(t *testing.T) {
@@ -89,7 +91,7 @@ table inet kindnet-fastpath {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			n := &FastPathAgent{}
+			n := &FastPathAgent{table: nft.NewTable(tableName, nftables.TableFamilyINet)}
 			runtime.LockOSThread()
 			defer runtime.UnlockOSThread()
 

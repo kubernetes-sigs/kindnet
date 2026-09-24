@@ -33,6 +33,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
+
+	"sigs.k8s.io/kindnet/pkg/nft"
 )
 
 const (
@@ -48,13 +50,13 @@ func NewFastpathAgent(packetThresold int) (*FastPathAgent, error) {
 	}
 	return &FastPathAgent{
 		packetThresold: uint32(packetThresold),
+		table:          nft.NewTable(tableName, nftables.TableFamilyINet),
 	}, nil
 }
 
 type FastPathAgent struct {
 	packetThresold uint32
-	// flushed is set once this process has recreated the table from scratch.
-	flushed bool
+	table          *nft.Table
 }
 
 func (ma *FastPathAgent) Run(ctx context.Context) error {
@@ -131,30 +133,11 @@ func (ma *FastPathAgent) getNodeInterfaces() (sets.Set[string], error) {
 
 func (ma *FastPathAgent) syncRules(devices []string) error {
 	klog.V(2).Info("Syncing kindnet-fastpath nftables rules")
-	nft, err := nftables.New()
+	tx, err := nftables.New()
 	if err != nil {
 		return fmt.Errorf("fastpath failure, can not start nftables:%v", err)
 	}
-
-	// Atomic rule replacement: add the table, flush its rules and load the new
-	// ones in a single transaction. The table, its base chain and its flowtable
-	// are kept, unregistering a netfilter hook makes the kernel drop every
-	// packet waiting in any nfqueue of the network namespace.
-	// https://wiki.nftables.org/wiki-nftables/index.php/Atomic_rule_replacement
-	fastpathTable := &nftables.Table{
-		Name:   tableName,
-		Family: nftables.TableFamilyINet,
-	}
-	nft.AddTable(fastpathTable)
-	nft.FlushTable(fastpathTable)
-
-	// Recreate the table on the first sync of this process to remove anything
-	// left by a previous version, such as a base chain with a different priority
-	// that can not be updated in place.
-	if !ma.flushed {
-		nft.DelTable(fastpathTable)
-		nft.AddTable(fastpathTable)
-	}
+	fastpathTable := ma.table.Begin(tx)
 
 	devicesSet := &nftables.Set{
 		Table:        fastpathTable,
@@ -170,17 +153,13 @@ func (ma *FastPathAgent) syncRules(devices []string) error {
 		})
 	}
 
-	// flush table does not touch the sets, recreate it to replace its elements
-	if err := nft.AddSet(devicesSet, nil); err != nil {
-		return fmt.Errorf("failed to add Set %s : %v", devicesSet.Name, err)
-	}
-	nft.DelSet(devicesSet)
-	if err := nft.AddSet(devicesSet, elements); err != nil {
+	if err := nft.ReplaceSet(tx, devicesSet, elements); err != nil {
 		return fmt.Errorf("failed to add Set %s : %v", devicesSet.Name, err)
 	}
 
 	// Adding an existing flowtable registers the devices it does not have yet
-	// (Linux 5.13+), the kernel removes the ones that disappear.
+	// (Linux 5.13+), the kernel removes the ones that disappear. Deleting it
+	// would unregister its hooks like deleting a base chain does.
 	flowtable := &nftables.Flowtable{
 		Table:    fastpathTable,
 		Name:     kindnetFlowtable,
@@ -188,9 +167,9 @@ func (ma *FastPathAgent) syncRules(devices []string) error {
 		Hooknum:  nftables.FlowtableHookIngress,
 		Priority: nftables.FlowtablePriorityRef(5),
 	}
-	nft.AddFlowtable(flowtable)
+	tx.AddFlowtable(flowtable)
 
-	chain := nft.AddChain(&nftables.Chain{
+	chain := tx.AddChain(&nftables.Chain{
 		Name:     fastPathChain,
 		Table:    fastpathTable,
 		Type:     nftables.ChainTypeFilter,
@@ -201,7 +180,7 @@ func (ma *FastPathAgent) syncRules(devices []string) error {
 	// only offload devices that are being tracked
 	// TODO: check if this is really needed, we are using a set in addition
 	// to the flowtable.
-	nft.AddRule(&nftables.Rule{
+	tx.AddRule(&nftables.Rule{
 		Table: fastpathTable,
 		Chain: chain,
 		Exprs: []expr.Any{
@@ -211,7 +190,7 @@ func (ma *FastPathAgent) syncRules(devices []string) error {
 		},
 	})
 
-	nft.AddRule(&nftables.Rule{
+	tx.AddRule(&nftables.Rule{
 		Table: fastpathTable,
 		Chain: chain,
 		Exprs: []expr.Any{
@@ -222,7 +201,7 @@ func (ma *FastPathAgent) syncRules(devices []string) error {
 	})
 
 	//  ct packets > packetThresold flow add @kindnet-flowtables counter
-	nft.AddRule(&nftables.Rule{
+	tx.AddRule(&nftables.Rule{
 		Table: fastpathTable,
 		Chain: chain,
 		Exprs: []expr.Any{
@@ -236,29 +215,28 @@ func (ma *FastPathAgent) syncRules(devices []string) error {
 		},
 	})
 
-	err = nft.Flush()
+	err = ma.table.Commit(tx)
 	if err != nil {
 		return fmt.Errorf("failed to create kindnet-fastpath table: %v", err)
 	}
-	ma.flushed = true
 	return nil
 }
 
 func CleanRules() {
-	nft, err := nftables.New()
+	tx, err := nftables.New()
 	if err != nil {
 		klog.Infof("fastpath cleanup failure, can not start nftables:%v", err)
 		return
 	}
 	// Add+Delete is idempotent and won't return an error if the table doesn't already
 	// exist.
-	fastpathTable := nft.AddTable(&nftables.Table{
+	fastpathTable := tx.AddTable(&nftables.Table{
 		Family: nftables.TableFamilyINet,
 		Name:   tableName,
 	})
-	nft.DelTable(fastpathTable)
+	tx.DelTable(fastpathTable)
 
-	err = nft.Flush()
+	err = tx.Flush()
 	if err != nil {
 		klog.Infof("error deleting nftables rules %v", err)
 	}

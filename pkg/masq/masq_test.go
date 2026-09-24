@@ -27,7 +27,9 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/nftables"
 	"github.com/vishvananda/netns"
+	"sigs.k8s.io/kindnet/pkg/nft"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -241,6 +243,7 @@ table inet kindnet-ipmasq {
 				nodeLister: nodeInformer.Lister(),
 				noMasqV4:   v4s,
 				noMasqV6:   v6s,
+				table:      nft.NewTable(tableName, nftables.TableFamilyINet),
 			}
 			runtime.LockOSThread()
 			defer runtime.UnlockOSThread()

@@ -33,6 +33,7 @@ import (
 	"github.com/google/nftables/expr"
 	"github.com/mdlayher/netlink"
 	"sigs.k8s.io/kindnet/pkg/network"
+	"sigs.k8s.io/kindnet/pkg/nft"
 
 	"golang.org/x/net/dns/dnsmessage"
 	"golang.org/x/sys/unix"
@@ -69,6 +70,7 @@ func NewDNSCacheAgent(nodeName string, nameServersList []string, nodeInformer co
 		nodesSynced: nodeInformer.Informer().HasSynced,
 		nameServers: nameServersList,
 		interval:    5 * time.Minute,
+		table:       nft.NewTable(tableName, nftables.TableFamilyINet),
 		cache:       newIPCache(),
 		tcpPool:     NewPools(),
 	}
@@ -88,9 +90,8 @@ type DNSCacheAgent struct {
 	podCIDRv6   string
 	nameServers []string
 
-	nfq *nfqueue.Nfqueue
-	// flushed is set once this process has recreated the table from scratch.
-	flushed bool
+	nfq   *nfqueue.Nfqueue
+	table *nft.Table
 
 	cache   *ipCache
 	tcpPool *Pools
@@ -269,31 +270,13 @@ func printNfnetlinkQueueStats() {
 // SyncRules syncs ip masquerade rules
 func (d *DNSCacheAgent) SyncRules(ctx context.Context) error {
 	klog.FromContext(ctx).Info("Syncing nftables rules")
-	nft, err := nftables.New()
+	tx, err := nftables.New()
 	if err != nil {
 		return fmt.Errorf("can not start nftables:%v", err)
 	}
-	// Atomic rule replacement: add the table, flush its rules and load the new
-	// ones in a single transaction. The table and its base chains are kept,
-	// deleting a base chain unregisters its netfilter hook and the kernel drops
-	// every packet waiting in any nfqueue of the network namespace.
-	// https://wiki.nftables.org/wiki-nftables/index.php/Atomic_rule_replacement
-	table := &nftables.Table{
-		Name:   tableName,
-		Family: nftables.TableFamilyINet,
-	}
-	nft.AddTable(table)
-	nft.FlushTable(table)
+	table := d.table.Begin(tx)
 
-	// Recreate the table on the first sync of this process to remove anything
-	// left by a previous version, such as a base chain with a different priority
-	// that can not be updated in place.
-	if !d.flushed {
-		nft.DelTable(table)
-		nft.AddTable(table)
-	}
-
-	chain := nft.AddChain(&nftables.Chain{
+	chain := tx.AddChain(&nftables.Chain{
 		Name:     "prerouting",
 		Table:    table,
 		Type:     nftables.ChainTypeFilter,
@@ -322,12 +305,7 @@ func (d *DNSCacheAgent) SyncRules(ctx context.Context) error {
 				Key: addr.AsSlice(),
 			})
 		}
-		// flush table does not touch the sets, recreate it to replace its elements
-		if err := nft.AddSet(v4Set, nil); err != nil {
-			return fmt.Errorf("failed to add Set %s : %v", v4Set.Name, err)
-		}
-		nft.DelSet(v4Set)
-		if err := nft.AddSet(v4Set, elementsV4); err != nil {
+		if err := nft.ReplaceSet(tx, v4Set, elementsV4); err != nil {
 			return fmt.Errorf("failed to add Set %s : %v", v4Set.Name, err)
 		}
 
@@ -335,7 +313,7 @@ func (d *DNSCacheAgent) SyncRules(ctx context.Context) error {
 		if err != nil {
 			klog.Infof("SHOULD NOT HAPPEN bad cidr%s", d.podCIDRv4)
 		} else {
-			nft.AddRule(&nftables.Rule{
+			tx.AddRule(&nftables.Rule{
 				Table: table,
 				Chain: chain,
 				Exprs: []expr.Any{
@@ -376,11 +354,7 @@ func (d *DNSCacheAgent) SyncRules(ctx context.Context) error {
 				Key: addr.AsSlice(),
 			})
 		}
-		if err := nft.AddSet(v6Set, nil); err != nil {
-			return fmt.Errorf("failed to add Set %s : %v", v6Set.Name, err)
-		}
-		nft.DelSet(v6Set)
-		if err := nft.AddSet(v6Set, elementsV6); err != nil {
+		if err := nft.ReplaceSet(tx, v6Set, elementsV6); err != nil {
 			return fmt.Errorf("failed to add Set %s : %v", v6Set.Name, err)
 		}
 
@@ -389,7 +363,7 @@ func (d *DNSCacheAgent) SyncRules(ctx context.Context) error {
 			klog.Infof("SHOULD NOT HAPPEN bad cidr%s", d.podCIDRv6)
 		} else {
 			//  ip6 saddr pod-range udp dport 53 queue flags bypass to 103
-			nft.AddRule(&nftables.Rule{
+			tx.AddRule(&nftables.Rule{
 				Table: table,
 				Chain: chain,
 				Exprs: []expr.Any{
@@ -411,7 +385,7 @@ func (d *DNSCacheAgent) SyncRules(ctx context.Context) error {
 	}
 
 	// replies from the agent should not be tracked
-	chainOutput := nft.AddChain(&nftables.Chain{
+	chainOutput := tx.AddChain(&nftables.Chain{
 		Name:     "output",
 		Table:    table,
 		Type:     nftables.ChainTypeFilter,
@@ -420,7 +394,7 @@ func (d *DNSCacheAgent) SyncRules(ctx context.Context) error {
 	})
 
 	//  meta mark 0x00000079 udp sport 53 notrack
-	nft.AddRule(&nftables.Rule{
+	tx.AddRule(&nftables.Rule{
 		Table: table,
 		Chain: chainOutput,
 		Exprs: []expr.Any{
@@ -434,16 +408,15 @@ func (d *DNSCacheAgent) SyncRules(ctx context.Context) error {
 		},
 	})
 
-	if err := nft.Flush(); err != nil {
+	if err := d.table.Commit(tx); err != nil {
 		klog.Infof("error syncing nftables rules %v", err)
 		return err
 	}
-	d.flushed = true
 	return nil
 }
 
 func CleanRules() {
-	nft, err := nftables.New()
+	tx, err := nftables.New()
 	if err != nil {
 		klog.Errorf("can not start nftables:%v", err)
 		return
@@ -454,10 +427,10 @@ func CleanRules() {
 		Family: nftables.TableFamilyINet,
 	}
 
-	nft.AddTable(table)
-	nft.DelTable(table)
+	tx.AddTable(table)
+	tx.DelTable(table)
 
-	if err := nft.Flush(); err != nil {
+	if err := tx.Flush(); err != nil {
 		klog.Infof("error deleting nftables rules %v", err)
 	}
 }

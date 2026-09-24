@@ -26,7 +26,9 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/nftables"
 	"github.com/vishvananda/netns"
+	"sigs.k8s.io/kindnet/pkg/nft"
 )
 
 func TestNFLogAgent_syncRules(t *testing.T) {
@@ -118,6 +120,7 @@ table inet kindnet-dnscache {
 				podCIDRv4:   tt.podCIDRv4,
 				podCIDRv6:   tt.podCIDRv6,
 				nameServers: tt.nameservers,
+				table:       nft.NewTable(tableName, nftables.TableFamilyINet),
 			}
 			runtime.LockOSThread()
 			defer runtime.UnlockOSThread()
