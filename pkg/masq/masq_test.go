@@ -27,7 +27,9 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/nftables"
 	"github.com/vishvananda/netns"
+	"sigs.k8s.io/kindnet/pkg/nft"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -241,6 +243,7 @@ table inet kindnet-ipmasq {
 				nodeLister: nodeInformer.Lister(),
 				noMasqV4:   v4s,
 				noMasqV6:   v6s,
+				table:      nft.NewTable(tableName, nftables.TableFamilyINet),
 			}
 			runtime.LockOSThread()
 			defer runtime.UnlockOSThread()
@@ -261,6 +264,15 @@ table inet kindnet-ipmasq {
 
 			if err := ma.SyncRules(context.Background()); err != nil {
 				t.Fatalf("IPMasqAgent.SyncRules() error = %v", err)
+			}
+			// A resync must keep the table and its base chain, deleting a base
+			// chain drops the packets waiting in every nfqueue of the namespace.
+			handles := baseHandles(t)
+			if err := ma.SyncRules(context.Background()); err != nil {
+				t.Fatalf("IPMasqAgent.SyncRules() resync error = %v", err)
+			}
+			if diff := cmp.Diff(handles, baseHandles(t)); diff != "" {
+				t.Errorf("resync recreated the table or its chains (-first +resync):\n%s", diff)
 			}
 
 			cmd := exec.Command("nft", "list", "table", "inet", tableName)
@@ -294,4 +306,17 @@ func compareMultilineStringsIgnoreIndentation(str1, str2 string) bool {
 	str2 = re.ReplaceAllString(str2, "")
 
 	return str1 == str2
+}
+
+var handleRE = regexp.MustCompile(`(?m)^\s*(?:table|chain|flowtable) .* # handle \d+$`)
+
+// baseHandles returns the table, chain and flowtable lines of "nft -a list table",
+// whose kernel handles change when the object is deleted and created again.
+func baseHandles(t *testing.T) []string {
+	t.Helper()
+	out, err := exec.Command("nft", "-a", "list", "table", "inet", tableName).CombinedOutput()
+	if err != nil {
+		t.Fatalf("nft -a list table error = %v, output: %s", err, string(out))
+	}
+	return handleRE.FindAllString(string(out), -1)
 }

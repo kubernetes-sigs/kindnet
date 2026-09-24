@@ -26,7 +26,9 @@ import (
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/nftables"
 	"github.com/vishvananda/netns"
+	"sigs.k8s.io/kindnet/pkg/nft"
 )
 
 func TestNFLogAgent_syncRules(t *testing.T) {
@@ -118,6 +120,7 @@ table inet kindnet-dnscache {
 				podCIDRv4:   tt.podCIDRv4,
 				podCIDRv6:   tt.podCIDRv6,
 				nameServers: tt.nameservers,
+				table:       nft.NewTable(tableName, nftables.TableFamilyINet),
 			}
 			runtime.LockOSThread()
 			defer runtime.UnlockOSThread()
@@ -138,6 +141,15 @@ table inet kindnet-dnscache {
 
 			if err := n.SyncRules(context.Background()); err != nil {
 				t.Fatalf("DNSCacheAgent.SyncRules() error = %v", err)
+			}
+			// A resync must keep the table and its base chains, deleting a base
+			// chain drops the packets waiting in every nfqueue of the namespace.
+			handles := baseHandles(t)
+			if err := n.SyncRules(context.Background()); err != nil {
+				t.Fatalf("DNSCacheAgent.SyncRules() resync error = %v", err)
+			}
+			if diff := cmp.Diff(handles, baseHandles(t)); diff != "" {
+				t.Errorf("resync recreated the table or its chains (-first +resync):\n%s", diff)
 			}
 
 			cmd := exec.Command("nft", "list", "table", "inet", tableName)
@@ -171,4 +183,17 @@ func compareMultilineStringsIgnoreIndentation(str1, str2 string) bool {
 	str2 = re.ReplaceAllString(str2, "")
 
 	return str1 == str2
+}
+
+var handleRE = regexp.MustCompile(`(?m)^\s*(?:table|chain|flowtable) .* # handle \d+$`)
+
+// baseHandles returns the table, chain and flowtable lines of "nft -a list table",
+// whose kernel handles change when the object is deleted and created again.
+func baseHandles(t *testing.T) []string {
+	t.Helper()
+	out, err := exec.Command("nft", "-a", "list", "table", "inet", tableName).CombinedOutput()
+	if err != nil {
+		t.Fatalf("nft -a list table error = %v, output: %s", err, string(out))
+	}
+	return handleRE.FindAllString(string(out), -1)
 }
