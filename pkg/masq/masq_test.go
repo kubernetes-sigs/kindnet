@@ -19,27 +19,26 @@ package masq
 import (
 	"context"
 	"net/netip"
-	"os"
 	"os/exec"
 	"regexp"
-	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/vishvananda/netns"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
+
+	"sigs.k8s.io/kindnet/pkg/nstest"
 )
 
 func TestIPMasqAgent_SyncRules(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("Test requires root privileges.")
-	}
+	nstest.ExecInUserns(t, testIPMasqAgent_SyncRules)
+}
 
+func testIPMasqAgent_SyncRules(t *testing.T) {
 	tests := []struct {
 		name             string
 		nodes            []*v1.Node
@@ -242,23 +241,6 @@ table inet kindnet-ipmasq {
 				noMasqV4:   v4s,
 				noMasqV6:   v6s,
 			}
-			runtime.LockOSThread()
-			defer runtime.UnlockOSThread()
-
-			// Save the current network namespace
-			origns, err := netns.Get()
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer origns.Close()
-
-			// Create a new network namespace
-			newns, err := netns.New()
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer newns.Close()
-
 			if err := ma.SyncRules(context.Background()); err != nil {
 				t.Fatalf("IPMasqAgent.SyncRules() error = %v", err)
 			}
@@ -281,8 +263,6 @@ table inet kindnet-ipmasq {
 			if !strings.Contains(string(out), "No such file or directory") {
 				t.Errorf("unexpected error %v %s", err, string(out))
 			}
-			// Switch back to the original namespace
-			netns.Set(origns)
 		})
 	}
 }

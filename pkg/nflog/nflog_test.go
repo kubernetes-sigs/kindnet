@@ -17,22 +17,21 @@ limitations under the License.
 package nflog
 
 import (
-	"os"
 	"os/exec"
 	"regexp"
-	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/vishvananda/netns"
+
+	"sigs.k8s.io/kindnet/pkg/nstest"
 )
 
 func TestNFLogAgent_syncRules(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("Test requires root privileges.")
-	}
+	nstest.ExecInUserns(t, testNFLogAgent_syncRules)
+}
 
+func testNFLogAgent_syncRules(t *testing.T) {
 	tests := []struct {
 		name             string
 		expectedNftables string
@@ -53,22 +52,6 @@ table inet kindnet-nflog {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			n := &NFLogAgent{}
-			runtime.LockOSThread()
-			defer runtime.UnlockOSThread()
-
-			// Save the current network namespace
-			origns, err := netns.Get()
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer origns.Close()
-
-			// Create a new network namespace
-			newns, err := netns.New()
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer newns.Close()
 
 			if err := n.syncRules(); err != nil {
 				t.Fatalf("NFLogAgent.SyncRules() error = %v", err)
@@ -92,8 +75,6 @@ table inet kindnet-nflog {
 			if !strings.Contains(string(out), "No such file or directory") {
 				t.Errorf("unexpected error %v %s", err, string(out))
 			}
-			// Switch back to the original namespace
-			netns.Set(origns)
 		})
 	}
 }

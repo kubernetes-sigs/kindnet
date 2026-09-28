@@ -48,7 +48,7 @@ func TestMain(m *testing.M) {
 
 func TestCNIPlugin(t *testing.T) {
 	if os.Getuid() != 0 {
-		t.Skip("Test requires root privileges.")
+		t.Fatal("Test requires root privileges, run it with make test-cni")
 	}
 	tests := []struct {
 		name   string
@@ -170,7 +170,7 @@ func TestCNIPlugin(t *testing.T) {
 
 func TestAddDel(t *testing.T) {
 	if os.Getuid() != 0 {
-		t.Skip("Test requires root privileges.")
+		t.Fatal("Test requires root privileges, run it with make test-cni")
 	}
 	null, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
@@ -288,7 +288,7 @@ func TestAddDel(t *testing.T) {
 
 func TestAdds(t *testing.T) {
 	if os.Getuid() != 0 {
-		t.Skip("Test requires root privileges.")
+		t.Fatal("Test requires root privileges, run it with make test-cni")
 	}
 	null, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
 	if err != nil {
@@ -416,7 +416,7 @@ func TestAdds(t *testing.T) {
 
 func TestHostPort(t *testing.T) {
 	if os.Getuid() != 0 {
-		t.Skip("Test requires root privileges.")
+		t.Fatal("Test requires root privileges, run it with make test-cni")
 	}
 	containerPort := 8080
 	tests := []struct {

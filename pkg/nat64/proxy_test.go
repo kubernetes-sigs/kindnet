@@ -18,22 +18,21 @@ package nat64
 
 import (
 	"context"
-	"os"
 	"os/exec"
 	"regexp"
-	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
-	"github.com/vishvananda/netns"
+
+	"sigs.k8s.io/kindnet/pkg/nstest"
 )
 
 func TestNAT64Agent_SyncRules(t *testing.T) {
-	if os.Getuid() != 0 {
-		t.Skip("Test requires root privileges.")
-	}
+	nstest.ExecInUserns(t, testNAT64Agent_SyncRules)
+}
 
+func testNAT64Agent_SyncRules(t *testing.T) {
 	tests := []struct {
 		name             string
 		expectedNftables string
@@ -58,22 +57,6 @@ func TestNAT64Agent_SyncRules(t *testing.T) {
 				udpProxyPort: 60693,
 				tcpProxyPort: 45217,
 			}
-			runtime.LockOSThread()
-			defer runtime.UnlockOSThread()
-
-			// Save the current network namespace
-			origns, err := netns.Get()
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer origns.Close()
-
-			// Create a new network namespace
-			newns, err := netns.New()
-			if err != nil {
-				t.Fatal(err)
-			}
-			defer newns.Close()
 
 			if err := n.SyncRules(context.Background()); err != nil {
 				t.Fatalf("NAT64Agent.SyncRules() error = %v", err)
@@ -97,8 +80,6 @@ func TestNAT64Agent_SyncRules(t *testing.T) {
 			if !strings.Contains(string(out), "No such file or directory") {
 				t.Errorf("unexpected error %v %s", err, string(out))
 			}
-			// Switch back to the original namespace
-			netns.Set(origns)
 		})
 	}
 }
