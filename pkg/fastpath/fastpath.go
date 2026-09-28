@@ -33,6 +33,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
+
+	"sigs.k8s.io/kindnet/pkg/network"
 )
 
 const (
@@ -41,6 +43,10 @@ const (
 	kindnetSetDevices = "kindnet-set-devices"
 	fastPathChain     = "kindnet-fastpath-chain"
 )
+
+// chainPolicyAccept is declared on the base chain so a sync over a chain left
+// with another policy resets it, the kernel updates the policy in place.
+var chainPolicyAccept = nftables.ChainPolicyAccept
 
 func NewFastpathAgent(packetThresold int) (*FastPathAgent, error) {
 	if packetThresold > math.MaxUint32 {
@@ -80,7 +86,7 @@ func (ma *FastPathAgent) Run(ctx context.Context) error {
 		}
 
 		if len(ifnames) > 0 && !ifnames.Equal(currentIf) {
-			err := ma.syncRules(ifnames.UnsortedList())
+			err := ma.syncRules(ctx, ifnames.UnsortedList())
 			if err != nil {
 				klog.Error(err, "failed to add network interfaces to the flowtable")
 			} else {
@@ -127,21 +133,57 @@ func (ma *FastPathAgent) getNodeInterfaces() (sets.Set[string], error) {
 	return ifNames, nil
 }
 
-func (ma *FastPathAgent) syncRules(devices []string) error {
+func (ma *FastPathAgent) syncRules(ctx context.Context, devices []string) error {
 	klog.V(2).Info("Syncing kindnet-fastpath nftables rules")
+	logger := klog.FromContext(ctx)
+
+	// Replace the rules in place: the table, its base chain and its flowtable
+	// are kept, so their netfilter hooks stay registered. Unregistering a hook
+	// makes the kernel drop every packet waiting in any nfqueue of the network
+	// namespace.
+	// https://wiki.nftables.org/wiki-nftables/index.php/Atomic_rule_replacement
+	err := ma.writeRules(devices, false)
+	if err == nil {
+		return nil
+	}
+	if !network.IsNetlinkRejection(err) {
+		// The kernel reply was not read, the batch may have been committed.
+		// The next interface change or periodic sync retries in place again.
+		return err
+	}
+	// The kernel rejected the transaction and applied nothing. A base chain,
+	// set or flowtable left by a previous version with another definition can
+	// not be updated in place, recreating the table is the only way out. If the
+	// error has another cause the second transaction is rejected as well and,
+	// again, nothing is applied.
+	logger.Info("nftables rules can not be updated in place, recreating the table", "error", err)
+	if err := ma.writeRules(devices, true); err != nil {
+		return err
+	}
+	logger.Info("nftables table recreated, any packet waiting in an nfqueue of the namespace was dropped")
+	return nil
+}
+
+// writeRules sends the whole ruleset in one transaction. With recreate the
+// table is deleted and created again in the same transaction, otherwise its
+// rules are flushed and the base chain and flowtable kept.
+func (ma *FastPathAgent) writeRules(devices []string, recreate bool) error {
 	nft, err := nftables.New()
 	if err != nil {
 		return fmt.Errorf("fastpath failure, can not start nftables:%v", err)
 	}
 
-	// add + delete + add for flushing all the table
 	fastpathTable := &nftables.Table{
 		Name:   tableName,
 		Family: nftables.TableFamilyINet,
 	}
 	nft.AddTable(fastpathTable)
-	nft.DelTable(fastpathTable)
-	nft.AddTable(fastpathTable)
+	if recreate {
+		nft.DelTable(fastpathTable)
+		nft.AddTable(fastpathTable)
+	} else {
+		nft.FlushTable(fastpathTable)
+	}
 
 	devicesSet := &nftables.Set{
 		Table:        fastpathTable,
@@ -157,10 +199,20 @@ func (ma *FastPathAgent) syncRules(devices []string) error {
 		})
 	}
 
+	// flush table does not touch the sets, delete and recreate it with the new
+	// elements. add + delete so the delete succeeds whether or not the set
+	// exists; the flush above released the references the rules held on it.
+	if err := nft.AddSet(devicesSet, nil); err != nil {
+		return fmt.Errorf("failed to add Set %s : %v", devicesSet.Name, err)
+	}
+	nft.DelSet(devicesSet)
 	if err := nft.AddSet(devicesSet, elements); err != nil {
 		return fmt.Errorf("failed to add Set %s : %v", devicesSet.Name, err)
 	}
 
+	// Adding an existing flowtable registers the devices it does not have yet
+	// (Linux 5.13+), the kernel removes the ones that disappear. Deleting it
+	// would unregister its hooks like deleting a base chain does.
 	flowtable := &nftables.Flowtable{
 		Table:    fastpathTable,
 		Name:     kindnetFlowtable,
@@ -176,6 +228,7 @@ func (ma *FastPathAgent) syncRules(devices []string) error {
 		Type:     nftables.ChainTypeFilter,
 		Hooknum:  nftables.ChainHookForward,
 		Priority: nftables.ChainPriorityMangle, // before DNAT
+		Policy:   &chainPolicyAccept,
 	})
 
 	// only offload devices that are being tracked
@@ -218,7 +271,7 @@ func (ma *FastPathAgent) syncRules(devices []string) error {
 
 	err = nft.Flush()
 	if err != nil {
-		return fmt.Errorf("failed to create kindnet-fastpath table: %v", err)
+		return fmt.Errorf("failed to create kindnet-fastpath table: %w", err)
 	}
 	return nil
 }

@@ -18,6 +18,7 @@ package masq
 
 import (
 	"context"
+	"fmt"
 	"net/netip"
 	"os/exec"
 	"regexp"
@@ -241,8 +242,18 @@ table inet kindnet-ipmasq {
 				noMasqV4:   v4s,
 				noMasqV6:   v6s,
 			}
+
 			if err := ma.SyncRules(context.Background()); err != nil {
 				t.Fatalf("IPMasqAgent.SyncRules() error = %v", err)
+			}
+			// A resync must keep the table and its base chain, deleting a base
+			// chain drops the packets waiting in every nfqueue of the namespace.
+			handles := baseHandles(t)
+			if err := ma.SyncRules(context.Background()); err != nil {
+				t.Fatalf("IPMasqAgent.SyncRules() resync error = %v", err)
+			}
+			if diff := cmp.Diff(handles, baseHandles(t)); diff != "" {
+				t.Errorf("resync recreated the table or its chains (-first +resync):\n%s", diff)
 			}
 
 			cmd := exec.Command("nft", "list", "table", "inet", tableName)
@@ -274,4 +285,160 @@ func compareMultilineStringsIgnoreIndentation(str1, str2 string) bool {
 	str2 = re.ReplaceAllString(str2, "")
 
 	return str1 == str2
+}
+
+var handleRE = regexp.MustCompile(`(?m)^\s*(?:table|chain|flowtable) .* # handle \d+$`)
+
+// baseHandles returns the table, chain and flowtable lines of "nft -a list table",
+// whose kernel handles change when the object is deleted and created again.
+func baseHandles(t *testing.T) []string {
+	t.Helper()
+	out, err := exec.Command("nft", "-a", "list", "table", "inet", tableName).CombinedOutput()
+	if err != nil {
+		ruleset, _ := exec.Command("nft", "list", "ruleset").CombinedOutput()
+		t.Fatalf("nft -a list table error = %v, output: %s\nruleset:\n%s", err, string(out), ruleset)
+	}
+	return handleRE.FindAllString(string(out), -1)
+}
+
+// tableHandle returns the kernel handle of the table, which changes when the
+// table is deleted and created again.
+func tableHandle(t *testing.T) string {
+	t.Helper()
+	for _, line := range baseHandles(t) {
+		if strings.HasPrefix(strings.TrimSpace(line), "table ") {
+			return line
+		}
+	}
+	t.Fatalf("table %s not found", tableName)
+	return ""
+}
+
+func listTable(t *testing.T) string {
+	t.Helper()
+	out, err := exec.Command("nft", "list", "table", "inet", tableName).CombinedOutput()
+	if err != nil {
+		t.Fatalf("nft list table error = %v, output: %s", err, string(out))
+	}
+	return string(out)
+}
+
+// TestIPMasqAgent_RecreateOnlyWhenRejected checks that a sync over a table a
+// previous version left behind updates it in place, and recreates it only
+// when the kernel refuses the in-place update.
+func TestIPMasqAgent_RecreateOnlyWhenRejected(t *testing.T) {
+	nstest.ExecInUserns(t, testIPMasqAgent_RecreateOnlyWhenRejected)
+}
+
+func testIPMasqAgent_RecreateOnlyWhenRejected(t *testing.T) {
+	client := fake.NewSimpleClientset()
+	informerFactory := informers.NewSharedInformerFactory(client, 0)
+	nodeInformer := informerFactory.Core().V1().Nodes()
+	node := &v1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node1"},
+		Spec:       v1.NodeSpec{PodCIDRs: []string{"10.244.0.0/24", "fd00:1:2:3::/64"}},
+	}
+	if err := nodeInformer.Informer().GetIndexer().Add(node); err != nil {
+		t.Fatal(err)
+	}
+	ma := &IPMasqAgent{
+		nodeLister: nodeInformer.Lister(),
+		noMasqV4:   []netip.Prefix{netip.MustParsePrefix("10.0.0.0/8")},
+		noMasqV6:   []netip.Prefix{netip.MustParsePrefix("fd00::/8")},
+	}
+	ctx := context.Background()
+
+	// leftover writes the table as a previous version could have left it. The
+	// objects in override replace the ones with the same name, or are added.
+	leftover := func(t *testing.T, override map[string]string) {
+		t.Helper()
+		objects := []struct{ name, definition string }{
+			{"postrouting", `chain postrouting { type nat hook postrouting priority srcnat - 10; policy accept; }`},
+			{"noMasqV4", `set noMasqV4 { type ipv4_addr; flags interval; auto-merge; elements = { 192.0.2.0/24 } }`},
+			{"noMasqV6", `set noMasqV6 { type ipv6_addr; flags interval; auto-merge; }`},
+		}
+		var b strings.Builder
+		fmt.Fprintf(&b, "flush ruleset\ntable inet %s {\n", tableName)
+		for _, o := range objects {
+			if definition, ok := override[o.name]; ok {
+				b.WriteString(definition)
+				delete(override, o.name)
+			} else {
+				b.WriteString(o.definition)
+			}
+			b.WriteString("\n")
+		}
+		for _, definition := range override {
+			b.WriteString(definition + "\n")
+		}
+		b.WriteString("}\n")
+		cmd := exec.Command("nft", "-f", "-")
+		cmd.Stdin = strings.NewReader(b.String())
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("nft -f: %v: %s\n%s", err, out, b.String())
+		}
+	}
+
+	tests := []struct {
+		name     string
+		override map[string]string
+		recreate bool
+	}{
+		{name: "same layout"},
+		{name: "chain policy differs, updated in place", override: map[string]string{
+			"postrouting": `chain postrouting { type nat hook postrouting priority srcnat - 10; policy drop; }`}},
+		{name: "stale regular chain and set are kept", override: map[string]string{
+			"old": `chain old { }`, "oldset": `set oldset { type ipv4_addr; }`}},
+		{name: "base chain priority differs", recreate: true, override: map[string]string{
+			"postrouting": `chain postrouting { type nat hook postrouting priority srcnat; policy accept; }`}},
+		{name: "base chain type differs", recreate: true, override: map[string]string{
+			"postrouting": `chain postrouting { type filter hook postrouting priority 90; policy accept; }`}},
+		{name: "base chain exists as regular chain", recreate: true, override: map[string]string{
+			"postrouting": `chain postrouting { }`}},
+		{name: "set flags differ", recreate: true, override: map[string]string{
+			"noMasqV4": `set noMasqV4 { type ipv4_addr; }`}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			leftover(t, tt.override)
+			before := baseHandles(t)
+			beforeTable := tableHandle(t)
+
+			if err := ma.SyncRules(ctx); err != nil {
+				t.Fatalf("SyncRules() error = %v", err)
+			}
+			if recreated := beforeTable != tableHandle(t); recreated != tt.recreate {
+				t.Errorf("table recreated = %v, want %v (handles before %v, after %v)", recreated, tt.recreate, before, baseHandles(t))
+			}
+			if !tt.recreate {
+				if diff := cmp.Diff(before, baseHandles(t)); diff != "" {
+					t.Errorf("in-place sync recreated a base chain (-leftover +sync):\n%s", diff)
+				}
+			}
+
+			// Whatever the path, the result is the ruleset of a clean sync,
+			// except for stale objects the in-place sync does not remove.
+			got := listTable(t)
+			CleanRules()
+			if err := ma.SyncRules(ctx); err != nil {
+				t.Fatalf("clean SyncRules() error = %v", err)
+			}
+			want := listTable(t)
+			if !strings.Contains(tt.name, "stale") && !compareMultilineStringsIgnoreIndentation(got, want) {
+				t.Errorf("sync over the leftover table differs from a clean sync (-clean +leftover):\n%s", cmp.Diff(want, got))
+			}
+			if strings.Contains(got, "192.0.2.0/24") {
+				t.Errorf("set elements of the leftover table were kept:\n%s", got)
+			}
+
+			// The next sync is in place again.
+			before = baseHandles(t)
+			if err := ma.SyncRules(ctx); err != nil {
+				t.Fatalf("second SyncRules() error = %v", err)
+			}
+			if diff := cmp.Diff(before, baseHandles(t)); diff != "" {
+				t.Errorf("second sync recreated the table or its chains (-first +second):\n%s", diff)
+			}
+		})
+	}
 }
