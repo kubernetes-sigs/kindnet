@@ -44,6 +44,10 @@ import (
 // and to implement proper deduplication to avoid overlapping ranges.
 const tableName = "kindnet-ipmasq"
 
+// chainPolicyAccept is declared on the base chain so a sync over a chain left
+// with another policy resets it, the kernel updates the policy in place.
+var chainPolicyAccept = nftables.ChainPolicyAccept
+
 // NewIPMasqAgent returns a new IPMasqAgent that avoids masquerading the intra-cluster traffic
 // but allows to masquerade the cluster to external traffic.
 func NewIPMasqAgent(nodeInformer coreinformers.NodeInformer, noMasqueradeCIDRs string) (*IPMasqAgent, error) {
@@ -174,19 +178,7 @@ func (ma *IPMasqAgent) handleErr(err error, key string) {
 // SyncRules syncs ip masquerade rules
 func (ma *IPMasqAgent) SyncRules(ctx context.Context) error {
 	klog.Info("Syncing kindnet-ipmasq nftables rules")
-	nft, err := nftables.New()
-	if err != nil {
-		return fmt.Errorf("kindnet ipamsq failure, can not start nftables: %v", err)
-	}
-
-	// add + delete + add for flushing all the table
-	table := &nftables.Table{
-		Name:   tableName,
-		Family: nftables.TableFamilyINet,
-	}
-	nft.AddTable(table)
-	nft.DelTable(table)
-	nft.AddTable(table)
+	logger := klog.FromContext(ctx)
 
 	prefixes := sets.New[netip.Prefix]()
 	prefixes.Insert(ma.noMasqV4...)
@@ -243,6 +235,53 @@ func (ma *IPMasqAgent) SyncRules(ctx context.Context) error {
 		)
 	}
 
+	// Replace the rules in place: the table and its base chain are kept, so
+	// its netfilter hook stays registered. Deleting a base chain makes the
+	// kernel drop every packet waiting in any nfqueue of the network namespace.
+	// https://wiki.nftables.org/wiki-nftables/index.php/Atomic_rule_replacement
+	err = writeRules(elementsV4, elementsV6, false)
+	if err == nil {
+		return nil
+	}
+	if !network.IsNetlinkRejection(err) {
+		// The kernel reply was not read, the batch may have been committed.
+		// The workqueue retries the sync later, in place again.
+		return err
+	}
+	// The kernel rejected the transaction and applied nothing. A base chain or
+	// set left by a previous version with another definition can not be
+	// updated in place, recreating the table is the only way out. If the error
+	// has another cause the second transaction is rejected as well and, again,
+	// nothing is applied.
+	logger.Info("nftables rules can not be updated in place, recreating the table", "error", err)
+	if err := writeRules(elementsV4, elementsV6, true); err != nil {
+		return err
+	}
+	logger.Info("nftables table recreated, any packet waiting in an nfqueue of the namespace was dropped")
+	return nil
+}
+
+// writeRules sends the whole ruleset in one transaction. With recreate the
+// table is deleted and created again in the same transaction, otherwise its
+// rules are flushed and the base chain kept.
+func writeRules(elementsV4, elementsV6 []nftables.SetElement, recreate bool) error {
+	nft, err := nftables.New()
+	if err != nil {
+		return fmt.Errorf("kindnet ipamsq failure, can not start nftables: %v", err)
+	}
+
+	table := &nftables.Table{
+		Name:   tableName,
+		Family: nftables.TableFamilyINet,
+	}
+	nft.AddTable(table)
+	if recreate {
+		nft.DelTable(table)
+		nft.AddTable(table)
+	} else {
+		nft.FlushTable(table)
+	}
+
 	setV4 := &nftables.Set{
 		Table:     table,
 		Name:      "noMasqV4",
@@ -259,10 +298,21 @@ func (ma *IPMasqAgent) SyncRules(ctx context.Context) error {
 		AutoMerge: true,
 	}
 
+	// flush table does not touch the sets, delete and recreate them with the
+	// new elements. add + delete so the delete succeeds whether or not the set
+	// exists; the flush above released the references the rules held on it.
+	if err := nft.AddSet(setV4, nil); err != nil {
+		return fmt.Errorf("failed to add Set %s : %v", setV4.Name, err)
+	}
+	nft.DelSet(setV4)
 	if err := nft.AddSet(setV4, elementsV4); err != nil {
 		return fmt.Errorf("failed to add Set %s : %v", setV4.Name, err)
 	}
 
+	if err := nft.AddSet(setV6, nil); err != nil {
+		return fmt.Errorf("failed to add Set %s : %v", setV6.Name, err)
+	}
+	nft.DelSet(setV6)
 	if err := nft.AddSet(setV6, elementsV6); err != nil {
 		return fmt.Errorf("failed to add Set %s : %v", setV6.Name, err)
 	}
@@ -273,6 +323,7 @@ func (ma *IPMasqAgent) SyncRules(ctx context.Context) error {
 		Type:     nftables.ChainTypeNAT,
 		Hooknum:  nftables.ChainHookPostrouting,
 		Priority: nftables.ChainPriorityRef(*nftables.ChainPriorityNATSource - 10),
+		Policy:   &chainPolicyAccept,
 	})
 
 	//  ct state established,related accept
@@ -334,7 +385,7 @@ func (ma *IPMasqAgent) SyncRules(ctx context.Context) error {
 
 	err = nft.Flush()
 	if err != nil {
-		return fmt.Errorf("failed to create kindnet-ipmasq table: %v", err)
+		return fmt.Errorf("failed to create kindnet-ipmasq table: %w", err)
 	}
 	return nil
 }

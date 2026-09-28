@@ -16,6 +16,9 @@ clean:
 
 test:
 	CGO_ENABLED=1 go test -v -race -count 1 ./...
+
+# The cni-kindnet tests create network namespaces under /run/netns, they need root.
+test-cni:
 	cd ./cmd/cni-kindnet ; CGO_ENABLED=1 go test -v -ldflags="-extldflags=-static" -tags sqlite_omit_load_extension,osusergo,netgo -race -count 1 .
 
 verify:

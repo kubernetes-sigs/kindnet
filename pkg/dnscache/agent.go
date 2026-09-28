@@ -60,6 +60,10 @@ const (
 	noTrackMark = uint32(110)
 )
 
+// chainPolicyAccept is declared on every base chain so a sync over a chain left
+// with another policy resets it, the kernel updates the policy in place.
+var chainPolicyAccept = nftables.ChainPolicyAccept
+
 // NewDNSCacheAgent caches all DNS traffic from Pods with network based on the PodCIDR of the node they are running.
 // Cache logic is very specific to Kubernetes,
 func NewDNSCacheAgent(nodeName string, nameServersList []string, nodeInformer coreinformers.NodeInformer) (*DNSCacheAgent, error) {
@@ -120,6 +124,13 @@ func (d *DNSCacheAgent) Run(ctx context.Context) error {
 	})
 	if err != nil {
 		return fmt.Errorf("failed to get Node PodCIDRs: %w", err)
+	}
+
+	// Sync the rules before opening the queue: if the sync has to recreate the
+	// table, packets waiting in the nfqueues of the namespace are dropped, and
+	// this way there is none of ours yet.
+	if err := d.SyncRules(ctx); err != nil {
+		return err
 	}
 
 	// https://netfilter.org/projects/libnetfilter_queue/doxygen/html/group__Queue.html
@@ -215,8 +226,10 @@ func (d *DNSCacheAgent) Run(ctx context.Context) error {
 	ticker := time.NewTicker(d.interval)
 	defer ticker.Stop()
 	for {
-		if ctx.Err() != nil {
+		select {
+		case <-ctx.Done():
 			return ctx.Err()
+		case <-ticker.C:
 		}
 
 		if err := d.SyncRules(ctx); err != nil {
@@ -228,12 +241,6 @@ func (d *DNSCacheAgent) Run(ctx context.Context) error {
 		}
 		// garbage collect ip cache entries
 		d.cache.gc()
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			continue
-		}
 	}
 }
 
@@ -264,22 +271,59 @@ func printNfnetlinkQueueStats() {
 	}
 }
 
-// SyncRules syncs ip masquerade rules
+// SyncRules syncs the dns cache intercept rules
 func (d *DNSCacheAgent) SyncRules(ctx context.Context) error {
-	klog.FromContext(ctx).Info("Syncing nftables rules")
+	logger := klog.FromContext(ctx)
+	logger.Info("Syncing nftables rules")
+
+	// Replace the rules in place: the table and its base chains are kept, so
+	// their netfilter hooks stay registered. Deleting a base chain makes the
+	// kernel drop every packet waiting in any nfqueue of the network namespace,
+	// including the DNS queries waiting in ours.
+	// https://wiki.nftables.org/wiki-nftables/index.php/Atomic_rule_replacement
+	err := d.writeRules(false)
+	if err == nil {
+		return nil
+	}
+	if !network.IsNetlinkRejection(err) {
+		// The kernel reply was not read, the batch may have been committed.
+		// The next periodic sync retries in place again.
+		klog.Infof("error syncing nftables rules %v", err)
+		return err
+	}
+	// The kernel rejected the transaction and applied nothing. A base chain or
+	// set left by a previous version with another definition can not be
+	// updated in place, recreating the table is the only way out. If the error
+	// has another cause the second transaction is rejected as well and, again,
+	// nothing is applied.
+	logger.Info("nftables rules can not be updated in place, recreating the table", "error", err)
+	if err := d.writeRules(true); err != nil {
+		klog.Infof("error syncing nftables rules %v", err)
+		return err
+	}
+	logger.Info("nftables table recreated, any packet waiting in an nfqueue of the namespace was dropped")
+	return nil
+}
+
+// writeRules sends the whole ruleset in one transaction. With recreate the
+// table is deleted and created again in the same transaction, otherwise its
+// rules are flushed and the base chains kept.
+func (d *DNSCacheAgent) writeRules(recreate bool) error {
 	nft, err := nftables.New()
 	if err != nil {
 		return fmt.Errorf("can not start nftables:%v", err)
 	}
-	// add + delete + add for flushing all the table
 	table := &nftables.Table{
 		Name:   tableName,
 		Family: nftables.TableFamilyINet,
 	}
-
 	nft.AddTable(table)
-	nft.DelTable(table)
-	nft.AddTable(table)
+	if recreate {
+		nft.DelTable(table)
+		nft.AddTable(table)
+	} else {
+		nft.FlushTable(table)
+	}
 
 	chain := nft.AddChain(&nftables.Chain{
 		Name:     "prerouting",
@@ -287,6 +331,7 @@ func (d *DNSCacheAgent) SyncRules(ctx context.Context) error {
 		Type:     nftables.ChainTypeFilter,
 		Hooknum:  nftables.ChainHookPrerouting, // packets not generated on the hosts
 		Priority: nftables.ChainPriorityRaw,    // just before conntrack
+		Policy:   &chainPolicyAccept,
 	})
 
 	//  ip saddr pod-range udp dport 53 queue flags bypass to 103
@@ -310,6 +355,13 @@ func (d *DNSCacheAgent) SyncRules(ctx context.Context) error {
 				Key: addr.AsSlice(),
 			})
 		}
+		// flush table does not touch the sets, delete and recreate it with the
+		// new elements. add + delete so the delete succeeds whether or not the
+		// set exists; the flush above released the references the rules held.
+		if err := nft.AddSet(v4Set, nil); err != nil {
+			return fmt.Errorf("failed to add Set %s : %v", v4Set.Name, err)
+		}
+		nft.DelSet(v4Set)
 		if err := nft.AddSet(v4Set, elementsV4); err != nil {
 			return fmt.Errorf("failed to add Set %s : %v", v4Set.Name, err)
 		}
@@ -359,10 +411,10 @@ func (d *DNSCacheAgent) SyncRules(ctx context.Context) error {
 				Key: addr.AsSlice(),
 			})
 		}
-		if err := nft.AddSet(v6Set, elementsV6); err != nil {
+		if err := nft.AddSet(v6Set, nil); err != nil {
 			return fmt.Errorf("failed to add Set %s : %v", v6Set.Name, err)
 		}
-
+		nft.DelSet(v6Set)
 		if err := nft.AddSet(v6Set, elementsV6); err != nil {
 			return fmt.Errorf("failed to add Set %s : %v", v6Set.Name, err)
 		}
@@ -400,6 +452,7 @@ func (d *DNSCacheAgent) SyncRules(ctx context.Context) error {
 		Type:     nftables.ChainTypeFilter,
 		Hooknum:  nftables.ChainHookOutput,  // packets not generated on the hosts
 		Priority: nftables.ChainPriorityRaw, // just before conntrack
+		Policy:   &chainPolicyAccept,
 	})
 
 	//  meta mark 0x00000079 udp sport 53 notrack
@@ -417,11 +470,7 @@ func (d *DNSCacheAgent) SyncRules(ctx context.Context) error {
 		},
 	})
 
-	if err := nft.Flush(); err != nil {
-		klog.Infof("error syncing nftables rules %v", err)
-		return err
-	}
-	return nil
+	return nft.Flush()
 }
 
 func CleanRules() {
