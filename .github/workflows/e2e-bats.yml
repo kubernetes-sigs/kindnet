@@ -1,0 +1,54 @@
+name: Bats E2E
+
+on:
+  push:
+    branches:
+      - 'master'
+      - 'main'
+  pull_request:
+    branches:
+      - 'master'
+      - 'main'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  e2e-bats:
+    name: BATS E2E Tests
+    runs-on: ubuntu-latest
+    steps:
+    - name: Check out code
+      uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+
+    - name: Set up Go
+      uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6
+      with:
+        go-version-file: .go-version
+
+    - name: Install KIND
+      run: |
+        curl -Lo ./kind https://kind.sigs.k8s.io/dl/v0.30.0/kind-linux-amd64
+        sudo chmod +x ./kind
+        sudo mv ./kind /usr/local/bin/kind
+
+    - name: Install kubectl
+      run: |
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        sudo chmod +x ./kubectl
+        sudo mv ./kubectl /usr/local/bin/kubectl
+
+    - name: Install BATS
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y bats
+
+    - name: Enable ipv4 and ipv6 forwarding
+      run: |
+        sudo sysctl -w net.ipv6.conf.all.forwarding=1
+        sudo sysctl -w net.ipv4.ip_forward=1
+
+    - name: Run BATS E2E tests
+      run: |
+        bats tests/
