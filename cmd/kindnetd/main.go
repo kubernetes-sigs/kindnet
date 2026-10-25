@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/kindnet/pkg/dnscache"
 	"sigs.k8s.io/kindnet/pkg/fastpath"
 	"sigs.k8s.io/kindnet/pkg/masq"
+	"sigs.k8s.io/kindnet/pkg/multicast"
 	kindnetnat64 "sigs.k8s.io/kindnet/pkg/nat64"
 	"sigs.k8s.io/kindnet/pkg/nflog"
 	kindnetnode "sigs.k8s.io/kindnet/pkg/node"
@@ -100,6 +101,7 @@ var (
 	nflogLevel                 int
 	ipsecOverlay               bool
 	nameServers                string
+	enableMulticast            bool
 )
 
 func init() {
@@ -118,6 +120,7 @@ func init() {
 
 	flag.IntVar(&nflogLevel, "nflog-level", 9, "The log level at which the TCP and UDP packets are logged to stdout (default 9)")
 	flag.BoolVar(&ipsecOverlay, "ipsec-overlay", false, "use IPSec to tunnel traffic between nodes (default false)")
+	flag.BoolVar(&enableMulticast, "multicast", false, "If set, enable multicast support (default false)")
 
 	flag.Usage = func() {
 		fmt.Fprint(os.Stderr, "Usage: kindnet [options]\n\n")
@@ -340,6 +343,22 @@ func main() {
 	} else {
 		klog.Info("Skipping nflog agent, cleaning old rules")
 		nflog.CleanRules()
+	}
+
+	if enableMulticast {
+		klog.Info("Multicast support enabled")
+		multicastAgent, err := multicast.NewMulticastAgent()
+		if err != nil {
+			klog.Fatalf("error creating multicast agent: %v", err)
+		}
+		go func() {
+			if err := multicastAgent.Run(ctx); err != nil {
+				klog.Infof("error running multicastAgent: %v", err)
+			}
+		}()
+	} else {
+		klog.Info("Skipping multicast agent, cleaning old rules")
+		multicast.CleanRules()
 	}
 
 	// network policies
