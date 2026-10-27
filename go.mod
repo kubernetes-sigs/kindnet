@@ -7,7 +7,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.33.10
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.20.4
 	github.com/aws/aws-sdk-go-v2/service/ec2 v1.341.0
-	github.com/containerd/nri v0.12.3
+	github.com/containerd/nri v0.12.5
 	github.com/florianl/go-nflog/v2 v2.3.0
 	github.com/florianl/go-nfqueue/v2 v2.1.0
 	github.com/google/go-cmp v0.7.0
@@ -81,7 +81,6 @@ require (
 	go.opentelemetry.io/otel/trace v1.44.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.4 // indirect
 	go.yaml.in/yaml/v3 v3.0.5 // indirect
-	golang.org/x/mod v0.42.0 // indirect
 	golang.org/x/sync v0.24.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260526163538-3dc84a4a5aaa // indirect
 	google.golang.org/grpc v1.83.2 // indirect
