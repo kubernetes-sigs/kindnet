@@ -301,11 +301,10 @@ func cmdAdd(args *skel.CmdArgs) (err error) {
 	var interfaceCreationError error
 	for i := 0; i < 3; i++ {
 		interfaceCreationError = createPodInterface(networkConfig)
-		if err != nil {
-			deletePodInterface(defaultInterface, args.Netns)
-		} else {
+		if interfaceCreationError == nil {
 			break
 		}
+		logger.Printf("failed attempt %d to create the interface on %s: %v", i+1, args.Netns, interfaceCreationError)
 	}
 	if interfaceCreationError != nil {
 		return fmt.Errorf("fail to create veth interface: %v", interfaceCreationError)

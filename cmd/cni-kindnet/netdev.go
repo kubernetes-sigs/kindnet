@@ -33,7 +33,7 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-func createPodInterface(netconf *NetworkConfig) error {
+func createPodInterface(netconf *NetworkConfig) (err error) {
 	iifName := defaultInterface      // veth interface name in the container
 	oofName := netconf.InterfaceName // veth interface name in the host
 
@@ -94,6 +94,14 @@ func createPodInterface(netconf *NetworkConfig) error {
 	if err != nil {
 		return fmt.Errorf("fail to add interface on namespace %s : %v", netconf.NetNS, err)
 	}
+	// on error, delete the veth pair created above, so a retry in cmdAdd can create it again with the same names
+	defer func() {
+		if err != nil {
+			if delErr := deletePodInterface(iifName, netconf.NetNS); delErr != nil {
+				logger.Printf("failed to delete interface %s on namespace %s after a failed setup: %v", iifName, netconf.NetNS, delErr)
+			}
+		}
+	}()
 
 	// veth interface has been created, add routes and addresses now
 
