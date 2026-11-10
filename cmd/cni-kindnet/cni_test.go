@@ -18,6 +18,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -38,7 +39,9 @@ import (
 
 	"github.com/containernetworking/cni/pkg/skel"
 	"github.com/containernetworking/cni/pkg/types"
+	"github.com/vishvananda/netlink"
 	"github.com/vishvananda/netns"
+	"golang.org/x/sys/unix"
 )
 
 // avoid problems with shared state
@@ -165,6 +168,132 @@ func TestCNIPlugin(t *testing.T) {
 			// TODO test check
 			err = cmdCheck(args)
 		})
+	}
+}
+
+// newTestNamespace creates a named network namespace and returns its path and a handle in it.
+func newTestNamespace(t *testing.T) (string, *netlink.Handle) {
+	t.Helper()
+	nsName := fmt.Sprintf("ns%x", rand.Uint32())
+	errCh := make(chan error)
+	go func() {
+		// NewNamed leaves this thread in the new namespace, exiting locked discards it
+		runtime.LockOSThread()
+		ns, err := netns.NewNamed(nsName)
+		if err == nil {
+			ns.Close()
+		}
+		errCh <- err
+	}()
+	if err := <-errCh; err != nil {
+		t.Fatalf("failed to create network namespace: %v", err)
+	}
+	t.Cleanup(func() { _ = netns.DeleteNamed(nsName) })
+	nsPath := filepath.Join("/run/netns", nsName)
+	ns, err := netns.GetFromPath(nsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { ns.Close() })
+	nh, err := netlink.NewHandleAt(ns)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(nh.Close)
+	return nsPath, nh
+}
+
+// TestAddExistingEth0 checks that ADD fails and leaves an eth0 it did not create untouched.
+func TestAddExistingEth0(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Fatal("Test requires root privileges, run it with make test-cni")
+	}
+	dbDir = t.TempDir()
+	if err := start(); err != nil {
+		t.Fatal(err)
+	}
+	nsPath, nh := newTestNamespace(t)
+
+	attrs := netlink.NewLinkAttrs()
+	attrs.Name = "eth0"
+	existing := &netlink.Dummy{LinkAttrs: attrs}
+	if err := nh.LinkAdd(existing); err != nil {
+		t.Fatalf("failed to create eth0: %v", err)
+	}
+
+	data, err := json.Marshal(KindnetConf{
+		NetConf: types.NetConf{CNIVersion: "0.3.1", Name: "test-network", Type: "cni-kindnet"},
+		Ranges:  []string{"192.0.2.0/24"},
+	})
+	if err != nil {
+		t.Fatalf("failed to serialize cni config: %v", err)
+	}
+	args := &skel.CmdArgs{ContainerID: "test-container", Netns: nsPath, IfName: "eth0", StdinData: data}
+	if err := cmdAdd(args); err == nil {
+		t.Fatal("CNI ADD succeeded with an existing eth0")
+	}
+
+	link, err := nh.LinkByName("eth0")
+	if err != nil || link.Attrs().Index != existing.Index {
+		t.Errorf("existing eth0 changed: %v, %v", link, err)
+	}
+}
+
+// TestAddFailureCleanup checks that a failure after veth creation is retried and leaves nothing.
+// 192.0.2.0/30 has one allocatable address, 192.0.2.3.
+func TestAddFailureCleanup(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Fatal("Test requires root privileges, run it with make test-cni")
+	}
+	dbDir = t.TempDir()
+	logFile := filepath.Join(dbDir, "test.log")
+	t.Setenv("CNI_LOG_FILE", logFile)
+	if err := start(); err != nil {
+		t.Fatal(err)
+	}
+	nsPath, nh := newTestNamespace(t)
+	t.Cleanup(func() { _ = deletePodInterface(defaultInterface, nsPath) })
+	// blackhole 192.0.2.3 on the host, so the plugin's host route to it fails with EEXIST
+	block := &netlink.Route{
+		Dst:  &net.IPNet{IP: net.ParseIP("192.0.2.3").To4(), Mask: net.CIDRMask(32, 32)},
+		Type: unix.RTN_BLACKHOLE,
+	}
+	if err := netlink.RouteAdd(block); err != nil {
+		t.Fatalf("failed to add the blocking route: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := netlink.RouteDel(block); err != nil {
+			t.Errorf("failed to delete the blocking route: %v", err)
+		}
+	})
+
+	data, err := json.Marshal(KindnetConf{
+		NetConf: types.NetConf{CNIVersion: "0.3.1", Name: "test-network", Type: "cni-kindnet"},
+		Ranges:  []string{"192.0.2.0/30"},
+	})
+	if err != nil {
+		t.Fatalf("failed to serialize cni config: %v", err)
+	}
+	args := &skel.CmdArgs{ContainerID: "test-container", Netns: nsPath, IfName: "eth0", StdinData: data}
+	if err := cmdAdd(args); err == nil {
+		t.Fatal("CNI ADD succeeded, expected the host route to fail")
+	}
+
+	logs, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// each attempt reaches the host route only if the previous one deleted the pair
+	if n := strings.Count(string(logs), "on host to the container interface"); n != 3 {
+		t.Errorf("expected 3 attempts to fail on the host route, got %d:\n%s", n, logs)
+	}
+	var notFound netlink.LinkNotFoundError
+	if _, err := nh.LinkByName("eth0"); !errors.As(err, &notFound) {
+		t.Errorf("expected no eth0 in the pod namespace, got: %v", err)
+	}
+	var pods int
+	if err := db.QueryRow("SELECT COUNT(*) FROM pods").Scan(&pods); err != nil || pods != 0 {
+		t.Errorf("expected no pods after the failed ADD, got %d: %v", pods, err)
 	}
 }
 
