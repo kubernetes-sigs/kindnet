@@ -8,7 +8,7 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.52
 	github.com/vishvananda/netlink v1.3.1
 	github.com/vishvananda/netns v0.0.5
-	golang.org/x/sys v0.49.0
+	golang.org/x/sys v0.50.0
 	k8s.io/utils v0.0.0-20261023123148-ca04ba58ecab
 )
 
