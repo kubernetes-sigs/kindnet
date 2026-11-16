@@ -5,7 +5,7 @@ go 1.26.0
 require (
 	github.com/containernetworking/cni v1.3.1
 	github.com/google/nftables v0.3.0
-	github.com/mattn/go-sqlite3 v1.14.52
+	github.com/mattn/go-sqlite3 v1.14.53
 	github.com/vishvananda/netlink v1.3.1
 	github.com/vishvananda/netns v0.0.5
 	golang.org/x/sys v0.50.0
