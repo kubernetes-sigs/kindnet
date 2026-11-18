@@ -105,14 +105,14 @@ func createPodInterface(netconf *NetworkConfig) error {
 	if err != nil {
 		return err
 	}
-	loLink, err := nhNs.LinkByName("lo")
+	loLink, err := linkByName(nhNs, "lo")
 	if err != nil && !errors.Is(err, unix.EINTR) {
 		return fmt.Errorf("could not get interface loopback on namespace %s : %w", netconf.NetNS, err)
 	}
 	_ = nhNs.LinkSetUp(loLink)
 
 	// set up the veth inside the container
-	nsLink, err := nhNs.LinkByName(iifName)
+	nsLink, err := linkByName(nhNs, iifName)
 	if err != nil && !errors.Is(err, unix.EINTR) {
 		return fmt.Errorf("could not get interface %s on namespace %s : %w", iifName, netconf.NetNS, err)
 	}
@@ -164,7 +164,7 @@ func createPodInterface(netconf *NetworkConfig) error {
 		return fmt.Errorf("could not get netlink handle on host : %w", err)
 	}
 
-	hostLink, err := nhRoot.LinkByName(oofName)
+	hostLink, err := linkByName(nhRoot, oofName)
 	if err != nil && !errors.Is(err, unix.EINTR) {
 		return fmt.Errorf("could not get interface %s on host : %w", oofName, err)
 	}
@@ -363,7 +363,7 @@ func deletePodInterface(ifName string, netNS string) error {
 		return nil
 	}
 
-	nsLink, err := nhNs.LinkByName(ifName)
+	nsLink, err := linkByName(nhNs, ifName)
 	if err != nil && !errors.Is(err, unix.EINTR) {
 		// interface is no present so no need to delete
 		return nil
@@ -380,7 +380,7 @@ func getDefaultGwInterfaceMTU() int {
 	filter := &netlink.Route{
 		Table: unix.RT_TABLE_MAIN,
 	}
-	routes, err := netlink.RouteListFiltered(netlink.FAMILY_ALL, filter, netlink.RT_FILTER_TABLE)
+	routes, err := routeListFiltered(netlink.FAMILY_ALL, filter, netlink.RT_FILTER_TABLE)
 	if err != nil && !errors.Is(err, unix.EINTR) {
 		return 0
 	}
